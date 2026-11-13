@@ -1,0 +1,13 @@
+# Lumen live system: log the "lumen" user straight into LiquidDesktop once at start-up; after logging out,
+# LiquidDesktop's own login screen (user lumen, password lumen). The installer writes the installed system's copy.
+[terminal]
+vt = 1
+
+[default_session]
+# software cursor: cage's hardware cursor is drawn upside down on some GPUs (virtio-gpu in VMs, among others)
+command = "env WLR_NO_HARDWARE_CURSORS=1 cage -s -d -- /usr/bin/liquid-desktop-greeter"
+user = "greeter"
+
+[initial_session]
+command = "env XDG_SESSION_TYPE=x11 XDG_SESSION_DESKTOP=liquid-desktop XDG_CURRENT_DESKTOP=LiquidDesktop LIQUID_SKIP_LOGIN=1 startx /usr/local/bin/lumen-live-session -- vt1 -keeptty"
+user = "lumen"

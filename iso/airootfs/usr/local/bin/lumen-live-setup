@@ -1,0 +1,17 @@
+#!/bin/sh
+# Lumen live system: create the "lumen" user (password "lumen") with an "Install Lumen" icon on the desktop.
+set -e
+if ! getent passwd lumen >/dev/null; then
+  useradd -m -G wheel,video,audio -s /bin/bash -c "Lumen Live" lumen
+  echo 'lumen:lumen' | chpasswd
+fi
+# the login screen's data folder and pictures (as LiquidDesktop's Settings › Login Screen sets them up)
+getent passwd greeter >/dev/null || useradd -r -M -s /usr/bin/nologin -G video greeter
+usermod -aG video greeter
+mkdir -p /var/cache/liquid-desktop-greeter && chown greeter:greeter /var/cache/liquid-desktop-greeter && chmod 750 /var/cache/liquid-desktop-greeter
+mkdir -p /var/lib/AccountsService/icons && chmod a+rx /var/lib/AccountsService /var/lib/AccountsService/icons
+cp /usr/share/icons/hicolor/256x256/apps/lumen-installer.png /var/lib/AccountsService/icons/lumen 2>/dev/null || true
+D=/home/lumen/Desktop
+mkdir -p "$D"
+install -m 755 /usr/share/applications/lumen-installer.desktop "$D/lumen-installer.desktop"
+chown -R lumen:lumen /home/lumen

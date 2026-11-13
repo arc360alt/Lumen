@@ -1,0 +1,10 @@
+#!/bin/sh
+# Lumen live session: LiquidDesktop, plus the installer opened once the desktop is up.
+# (LiquidDesktop doesn't run XDG autostart entries yet; once it does, this can become an autostart file.)
+( for i in $(seq 1 60); do
+    xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q 'window id' && break
+    sleep 1
+  done
+  sleep 3
+  exec lumen-installer ) >/dev/null 2>&1 &
+exec /usr/bin/liquid-desktop-session

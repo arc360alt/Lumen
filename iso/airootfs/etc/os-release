@@ -1,0 +1,11 @@
+NAME="Lumen"
+PRETTY_NAME="Lumen"
+ID=lumen
+ID_LIKE=arch
+BUILD_ID=rolling
+ANSI_COLOR="38;2;58;123;255"
+HOME_URL="https://github.com/arc360alt/Lumen"
+DOCUMENTATION_URL="https://wiki.archlinux.org/"
+SUPPORT_URL="https://github.com/arc360alt/Lumen/issues"
+BUG_REPORT_URL="https://github.com/arc360alt/Lumen/issues"
+LOGO=lumen

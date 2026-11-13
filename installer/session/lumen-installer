@@ -1,0 +1,12 @@
+#!/bin/sh
+# Install Lumen. Pass --test to try it without changing anything, --devtools to open the inspector.
+HERE="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+unset ELECTRON_RUN_AS_NODE
+# LiquidDesktop's cursors, like its own apps
+[ -z "$XCURSOR_THEME" ] && [ -d /usr/lib/liquid-desktop/session/cursors/MacOS-Tahoe-Cursor ] && export XCURSOR_THEME=MacOS-Tahoe-Cursor \
+  XCURSOR_PATH="/usr/lib/liquid-desktop/session/cursors:${XCURSOR_PATH:-/usr/share/icons}"
+for E in "$LUMEN_ELECTRON" "$HERE/node_modules/electron/dist/electron" "$(command -v electron43)" "$(command -v electron)"; do
+  [ -n "$E" ] && [ -x "$E" ] && exec "$E" "$HERE" "$@"
+done
+echo "lumen-installer: Electron not found (install electron43)" >&2
+exit 1

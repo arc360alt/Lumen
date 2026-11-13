@@ -1,0 +1,46 @@
+# Maintainer: arc360alt
+#
+# Install Lumen — the Lumen OS installer, packaged like LiquidDesktop itself (/usr/lib/<name>, launcher in /usr/bin).
+# Built from this checkout by Lumen's build.sh:   cd installer/packaging/arch && makepkg -f
+
+pkgname=lumen-installer
+pkgver=1.0.0
+pkgrel=1
+pkgdesc='The Lumen OS installer, in the LiquidDesktop style (Electron, Liquid Glass)'
+arch=('any')
+url='https://github.com/arc360alt/Lumen'
+license=('MIT')
+depends=(
+  'electron43'                         # the UI, same Electron as LiquidDesktop
+  'jq' 'rsync' 'arch-install-scripts'  # back end: settings, copying the system, genfstab/arch-chroot
+  'util-linux' 'dosfstools' 'e2fsprogs' 'btrfs-progs' 'xfsprogs' 'cryptsetup'
+  'grub' 'efibootmgr' 'os-prober'
+  'xorg-setxkbmap' 'sudo'
+)
+optdepends=('gparted: Open Partition Editor in the Storage step')
+makedepends=('npm')
+options=('!strip' '!debug')
+_src="$(cd "$startdir/../.." && pwd)"
+
+build() {
+  rm -rf "$srcdir/app"; mkdir -p "$srcdir/app"
+  cp -a "$_src"/{main,renderer,backend,session,package.json,package-lock.json} "$srcdir/app/"
+  cd "$srcdir/app"
+  # runtime dependencies only (the Inter font); Electron comes from electron43
+  npm ci --omit=dev --no-audit --no-fund --ignore-scripts
+}
+
+package() {
+  cd "$srcdir/app"
+  local dest="$pkgdir/usr/lib/$pkgname"
+  install -dm755 "$dest"
+  cp -a main renderer backend session package.json node_modules "$dest/"
+  rm -f "$dest/node_modules/.package-lock.json"
+  chmod 755 "$dest/backend/lumen-install" "$dest/session/lumen-installer"
+  install -dm755 "$pkgdir/usr/bin"
+  ln -s "/usr/lib/$pkgname/session/lumen-installer" "$pkgdir/usr/bin/lumen-installer"
+  install -Dm644 "$_src/packaging/lumen-installer.desktop" "$pkgdir/usr/share/applications/lumen-installer.desktop"
+  install -Dm644 renderer/img/lumen.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/lumen-installer.svg"
+  install -Dm644 renderer/img/lumen.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/lumen-installer.png"
+  install -Dm644 renderer/LICENSE.LiquidDesktop "$pkgdir/usr/share/licenses/$pkgname/LICENSE.LiquidDesktop"
+}

@@ -1,0 +1,2 @@
+# Lumen live system only (the installer removes this file): the live user runs the installer without a password
+lumen ALL=(ALL:ALL) NOPASSWD: ALL

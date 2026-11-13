@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Install Lumen
+GenericName=System Installer
+Comment=Install Lumen on this computer
+Exec=lumen-installer
+Icon=lumen-installer
+Terminal=false
+Type=Application
+Categories=System;
+Keywords=install;installer;setup;disk;

@@ -1,0 +1,7 @@
+build/
+out/
+installer/node_modules/
+installer/packaging/arch/src/
+installer/packaging/arch/pkg/
+installer/packaging/arch/*.pkg.tar.*
+vm/

@@ -1,0 +1,430 @@
+#!/usr/bin/env bash
+# Lumen installer — back end. Runs as root (the live session's user has passwordless sudo), reads the settings
+# as JSON on stdin, and installs Lumen by copying the live system image to the target disk ("unpackfs", the way
+# Calamares-based distros do it), then turning the copy into a normal installed system. No internet needed.
+#
+#   echo '{…}' | sudo lumen-install            install
+#   echo '{…}' | lumen-install --dry-run       print every command instead of running it (no root needed)
+#
+# Settings (JSON):
+#   locale, timezone, keyboard{layout,variant}, hostname,
+#   user{fullName,username,password,autologin,avatar(data:image/png;base64,…)}, root ("same" | "locked"),
+#   storage{mode: "erase" | "manual", filesystem: ext4|btrfs|xfs, swap: zram|none,
+#           erase:  disk, encrypt, passphrase
+#           manual: root, efi, formatEfi, home, formatHome}
+#
+# Output for the UI: ordinary log lines, plus  @@PROGRESS <pct> <text>,  @@STEP <id>,  @@ERROR <text>,  @@DONE
+set -Eeuo pipefail
+export LC_ALL=C.UTF-8
+
+DRY=0
+[ "${1:-}" = --dry-run ] && DRY=1
+T=/mnt/lumen-target
+((DRY)) && T=/tmp/lumen-dry-target
+# Safety: a real install only ever runs from the Lumen live ISO (never on an installed computer by accident)
+if ! ((DRY)) && { [ ! -d /run/archiso ] || ! grep -q '^ID=lumen' /etc/os-release 2>/dev/null; }; then
+  echo "@@ERROR Lumen can only be installed from the Lumen live system. Use --dry-run to try the installer elsewhere."; exit 1
+fi
+
+progress() { echo "@@PROGRESS $1 $2"; }
+step()     { echo "@@STEP $1"; }
+log()      { echo "$*"; }
+die()      { echo "@@ERROR $*"; exit 1; }
+# run a command (dry run: just show it)
+run() { echo "+ $*"; if ((DRY)); then sleep 0.05; else "$@"; fi; }
+# run a command that reads a secret on stdin; the secret is never echoed
+run_secret() { echo "+ $* <<< (hidden)"; if ((DRY)); then cat >/dev/null; else "$@"; fi; }
+# run a shell snippet inside the new system
+inchroot() { echo "+ [chroot] $*"; if ((DRY)); then sleep 0.05; else arch-chroot "$T" /bin/bash -euo pipefail -c "$*"; fi; }
+# write a file inside the new system (content on stdin)
+put() {   # put <path> [mode]
+  local f="$T$1" mode="${2:-644}"
+  if ((DRY)); then echo "+ write $1:"; sed 's/^/    | /'; return; fi
+  mkdir -p "$(dirname "$f")"; cat >"$f"; chmod "$mode" "$f"
+}
+
+LUKS_OPEN=0
+cleanup() {
+  local code=$?
+  ((DRY)) && return
+  set +e
+  sync
+  if mountpoint -q "$T"; then umount -R "$T" 2>/dev/null || umount -Rl "$T"; fi
+  ((LUKS_OPEN)) && cryptsetup close cryptroot 2>/dev/null
+  return $code
+}
+on_err() { echo "@@ERROR The step “$2” failed (line $1)."; }
+trap 'on_err $LINENO "$BASH_COMMAND"' ERR
+trap cleanup EXIT
+trap 'echo "@@ERROR Installation cancelled."; exit 130' INT TERM
+
+# ------------------------------------------------------------------ read and check the settings
+command -v jq >/dev/null || die "jq is missing from the live system."
+CONFIG="$(cat)"
+cfg() { jq -r "$1 // empty" <<<"$CONFIG"; }
+
+LOCALE="$(cfg .locale)";               LOCALE="${LOCALE:-en_US.UTF-8}"
+TIMEZONE="$(cfg .timezone)";           TIMEZONE="${TIMEZONE:-UTC}"
+KB_LAYOUT="$(cfg .keyboard.layout)";   KB_LAYOUT="${KB_LAYOUT:-us}"
+KB_VARIANT="$(cfg .keyboard.variant)"
+HOSTNAME_="$(cfg .hostname)"
+FULLNAME="$(cfg .user.fullName)"
+USERNAME="$(cfg .user.username)"
+PASSWORD="$(cfg .user.password)"
+AUTOLOGIN="$(cfg .user.autologin)"
+AVATAR="$(cfg .user.avatar)"
+ROOTMODE="$(cfg .root)";               ROOTMODE="${ROOTMODE:-locked}"
+MODE="$(cfg .storage.mode)"
+FS="$(cfg .storage.filesystem)";       FS="${FS:-ext4}"
+SWAP="$(cfg .storage.swap)";           SWAP="${SWAP:-zram}"
+DISK="$(cfg .storage.disk)"
+ENCRYPT="$(cfg .storage.encrypt)"
+PASSPHRASE="$(cfg .storage.passphrase)"
+ROOT_PART="$(cfg .storage.root)"
+EFI_PART="$(cfg .storage.efi)"
+FORMAT_EFI="$(cfg .storage.formatEfi)"
+HOME_PART="$(cfg .storage.home)"
+FORMAT_HOME="$(cfg .storage.formatHome)"
+UEFI=0; [ -d /sys/firmware/efi ] && UEFI=1
+
+[[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "The account name “$USERNAME” isn’t valid."
+case "$USERNAME" in root|bin|daemon|mail|ftp|http|nobody|dbus|greeter|lumen|systemd-*) die "“$USERNAME” is reserved by the system; choose another account name." ;; esac
+[ -n "$PASSWORD" ] || die "No password was given."
+[[ "$HOSTNAME_" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]] || die "The computer name “$HOSTNAME_” isn’t valid."
+[[ "$LOCALE" =~ ^[a-zA-Z_@.0-9-]+$ ]] || die "Unknown language “$LOCALE”."
+[ -e "/usr/share/zoneinfo/$TIMEZONE" ] && [[ "$TIMEZONE" != *..* ]] || die "Unknown time zone “$TIMEZONE”."
+[[ "$KB_LAYOUT" =~ ^[a-z0-9_-]+$ ]] && [[ "$KB_VARIANT" =~ ^[a-zA-Z0-9_-]*$ ]] || die "Unknown keyboard layout."
+case "$FS" in ext4|btrfs|xfs) ;; *) die "Unknown file system “$FS”." ;; esac
+isblock() { ((DRY)) || [ -b "$1" ]; }
+case "$MODE" in
+  erase)
+    [[ "$DISK" =~ ^/dev/[a-zA-Z0-9/_-]+$ ]] && isblock "$DISK" || die "The disk “$DISK” wasn’t found."
+    [ "$ENCRYPT" = true ] && [ -z "$PASSPHRASE" ] && die "Encryption needs a passphrase."
+    ;;
+  manual)
+    [[ "$ROOT_PART" =~ ^/dev/[a-zA-Z0-9/_-]+$ ]] && isblock "$ROOT_PART" || die "The partition “$ROOT_PART” wasn’t found."
+    ((UEFI)) && { [[ "$EFI_PART" =~ ^/dev/[a-zA-Z0-9/_-]+$ ]] && isblock "$EFI_PART" || die "This computer starts with UEFI: choose an EFI system partition."; }
+    [ -n "$HOME_PART" ] && { [[ "$HOME_PART" =~ ^/dev/[a-zA-Z0-9/_-]+$ ]] && isblock "$HOME_PART" || die "The partition “$HOME_PART” wasn’t found."; }
+    [ "$ROOT_PART" = "$EFI_PART" ] || [ "$ROOT_PART" = "$HOME_PART" ] && die "Lumen and another role can’t share one partition."
+    ENCRYPT=false
+    ;;
+  *) die "Choose where to install Lumen." ;;
+esac
+
+# where the system image comes from: the live system's read-only squashfs, so nothing from this live session
+# (its user, logs, caches) ends up in the install. A plain "/" copy is the fallback.
+SRC=""
+for d in /run/archiso/airootfs /run/archiso/sfs/airootfs; do [ -x "$d/usr/bin/pacman" ] && { SRC="$d"; break; }; done
+if [ -z "$SRC" ]; then
+  ((DRY)) || [ -d /run/archiso ] || die "This isn’t the Lumen live system, so there’s nothing to install from."
+  SRC=/
+fi
+
+log "Lumen installer — $(date)"
+log "Mode: $MODE   File system: $FS   Firmware: $([ $UEFI = 1 ] && echo UEFI || echo BIOS)   Source: $SRC   Dry run: $DRY"
+progress 1 "Getting ready…"
+
+# partition N of a disk: sda → sda2, nvme0n1 → nvme0n1p2, mmcblk0 → mmcblk0p2
+partdev() { if [[ "$1" =~ [0-9]$ ]]; then echo "${1}p$2"; else echo "$1$2"; fi; }
+settle() { ((DRY)) || { udevadm settle 2>/dev/null || true; sleep 1; }; }
+
+# ------------------------------------------------------------------ 1. disks
+step disks
+EFI_DEV=""; BOOT_DEV=""; ROOT_DEV=""; ESP_MNT=""; FORMAT_ESP=0; BOOT_DISK=""
+if [ "$MODE" = erase ]; then
+  progress 3 "Erasing $DISK…"
+  BOOT_DISK="$DISK"
+  # anything still using the disk (swap, old mounts from an earlier try) lets go of it first
+  if ! ((DRY)); then
+    for p in $(lsblk -lnpo NAME "$DISK" | tail -n +2); do swapoff "$p" 2>/dev/null || true; umount "$p" 2>/dev/null || true; done
+  fi
+  run wipefs -af "$DISK"
+  ROOT_GUID=4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709   # "Linux root (x86-64)", so tools recognize it
+  if ((UEFI)); then
+    LAYOUT="label: gpt
+size=1GiB, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name=\"EFI system partition\"
+type=$ROOT_GUID, name=\"Lumen\""
+    EFI_DEV="$(partdev "$DISK" 1)"; ROOT_DEV="$(partdev "$DISK" 2)"; ESP_MNT=/boot; FORMAT_ESP=1
+  elif [ "$ENCRYPT" = true ]; then
+    # BIOS + encryption: GRUB reads the kernel from a small unencrypted /boot
+    LAYOUT="label: gpt
+size=1MiB, type=21686148-6449-6E6F-744E-656564454649, name=\"BIOS boot\"
+size=1GiB, type=BC13C2FF-59E6-4262-A352-B275FD6F7172, name=\"boot\"
+type=$ROOT_GUID, name=\"Lumen\""
+    BOOT_DEV="$(partdev "$DISK" 2)"; ROOT_DEV="$(partdev "$DISK" 3)"
+  else
+    LAYOUT="label: gpt
+size=1MiB, type=21686148-6449-6E6F-744E-656564454649, name=\"BIOS boot\"
+type=$ROOT_GUID, name=\"Lumen\""
+    ROOT_DEV="$(partdev "$DISK" 2)"
+  fi
+  log "$LAYOUT"
+  if ((DRY)); then echo "+ sfdisk --wipe always $DISK"; else sfdisk --wipe always --wipe-partitions always "$DISK" <<<"$LAYOUT"; fi
+  settle
+else
+  ROOT_DEV="$ROOT_PART"
+  BOOT_DISK="/dev/$(lsblk -no PKNAME "$ROOT_PART" 2>/dev/null | head -1 || true)"
+  ((DRY)) && BOOT_DISK="${BOOT_DISK:-/dev/sdX}"
+  if ((UEFI)); then EFI_DEV="$EFI_PART"; ESP_MNT=/boot/efi; [ "$FORMAT_EFI" = true ] && FORMAT_ESP=1; fi
+  if ! ((DRY)); then
+    for p in "$ROOT_PART" $HOME_PART $EFI_PART; do swapoff "$p" 2>/dev/null || true; umount "$p" 2>/dev/null || true; done
+  fi
+fi
+
+FS_DEV="$ROOT_DEV"
+if [ "$ENCRYPT" = true ]; then
+  progress 6 "Encrypting the disk…"
+  printf '%s' "$PASSPHRASE" | run_secret cryptsetup luksFormat --type luks2 --batch-mode --label LumenCrypt --key-file=- "$ROOT_DEV"
+  printf '%s' "$PASSPHRASE" | run_secret cryptsetup open --key-file=- "$ROOT_DEV" cryptroot
+  LUKS_OPEN=1
+  FS_DEV=/dev/mapper/cryptroot
+fi
+
+progress 8 "Formatting…"
+((FORMAT_ESP)) && run mkfs.fat -F 32 -n EFI "$EFI_DEV"
+[ -n "$BOOT_DEV" ] && run mkfs.ext4 -F -q -L boot "$BOOT_DEV"
+case "$FS" in
+  ext4)  run mkfs.ext4 -F -q -L Lumen "$FS_DEV" ;;
+  xfs)   run mkfs.xfs -f -L Lumen "$FS_DEV" ;;
+  btrfs) run mkfs.btrfs -f -L Lumen "$FS_DEV" ;;
+esac
+if [ -n "$HOME_PART" ] && [ "$FORMAT_HOME" = true ]; then
+  case "$FS" in ext4) run mkfs.ext4 -F -q -L home "$HOME_PART" ;; xfs) run mkfs.xfs -f -L home "$HOME_PART" ;; btrfs) run mkfs.btrfs -f -L home "$HOME_PART" ;; esac
+fi
+
+progress 10 "Mounting…"
+run mkdir -p "$T"
+if [ "$FS" = btrfs ]; then
+  # the usual Arch layout: subvolumes for the system, homes, logs and the package cache (snapshot-friendly)
+  run mount "$FS_DEV" "$T"
+  for sv in @ @home @log @pkg; do run btrfs subvolume create "$T/$sv"; done
+  run umount "$T"
+  BOPT=noatime,compress=zstd:1
+  run mount -o "subvol=@,$BOPT" "$FS_DEV" "$T"
+  run mkdir -p "$T/home" "$T/var/log" "$T/var/cache/pacman/pkg"
+  [ -z "$HOME_PART" ] && run mount -o "subvol=@home,$BOPT" "$FS_DEV" "$T/home"
+  run mount -o "subvol=@log,$BOPT" "$FS_DEV" "$T/var/log"
+  run mount -o "subvol=@pkg,$BOPT" "$FS_DEV" "$T/var/cache/pacman/pkg"
+else
+  run mount "$FS_DEV" "$T"
+fi
+[ -n "$HOME_PART" ] && { run mkdir -p "$T/home"; run mount "$HOME_PART" "$T/home"; }
+[ -n "$BOOT_DEV" ] && { run mkdir -p "$T/boot"; run mount "$BOOT_DEV" "$T/boot"; }
+[ -n "$EFI_DEV" ] && { run mkdir -p "$T$ESP_MNT"; run mount "$EFI_DEV" "$T$ESP_MNT"; }
+
+# ------------------------------------------------------------------ 2. copy the system
+step copy
+progress 12 "Copying Lumen to the disk…"
+EXCLUDES=()
+if [ "$SRC" = / ]; then
+  for x in /dev/ /proc/ /sys/ /run/ /tmp/ /mnt/ /media/ /home/lumen/ /var/tmp/ /var/log/ /var/cache/pacman/pkg/ /lost+found /swapfile /etc/machine-id; do
+    EXCLUDES+=(--exclude="$x*")
+  done
+fi
+if ((DRY)); then
+  echo "+ rsync -aHAXx --numeric-ids ${EXCLUDES[*]} $SRC/ $T/"
+  for p in 5 15 30 45 60 75 90 100; do progress $((12 + p * 56 / 100)) "Copying Lumen to the disk… $p%"; sleep 0.3; done
+else
+  last=-1
+  set +e
+  rsync -aHAXx --numeric-ids --no-inc-recursive --info=progress2 "${EXCLUDES[@]}" "$SRC/" "$T/" 2>&1 | tr '\r' '\n' | while IFS= read -r line; do
+    if [[ "$line" =~ ([0-9]+)%\  ]]; then
+      p="${BASH_REMATCH[1]}"
+      if [ "$p" != "$last" ]; then last="$p"; progress $((12 + p * 56 / 100)) "Copying Lumen to the disk… $p%"; fi
+    elif [ -n "$line" ] && [[ ! "$line" =~ ^[[:space:]]*[0-9,]+[[:space:]] ]]; then
+      echo "$line"
+    fi
+  done
+  rc=${PIPESTATUS[0]}
+  set -e
+  # 24 = some files vanished while copying (only possible when copying the running "/")
+  [ "$rc" = 0 ] || { [ "$rc" = 24 ] && [ "$SRC" = / ]; } || die "Copying the system failed (rsync exit code $rc)."
+  mkdir -p "$T"/{dev,proc,sys,run,tmp,mnt,var/tmp}
+  chmod 1777 "$T/tmp" "$T/var/tmp"
+fi
+
+# ------------------------------------------------------------------ 3. make it a normal installed system
+step system
+progress 69 "Installing the kernel…"
+# the live image keeps the kernel on the ISO, not in /boot: put the one that matches the installed modules back
+if ((DRY)); then echo "+ cp /usr/lib/modules/<kver>/vmlinuz /boot/vmlinuz-linux"; else
+  found=0
+  for m in "$T"/usr/lib/modules/*/; do
+    if [ -f "$m/pkgbase" ] && [ -f "$m/vmlinuz" ]; then
+      install -Dm644 "$m/vmlinuz" "$T/boot/vmlinuz-$(cat "$m/pkgbase")"; found=1
+    fi
+  done
+  ((found)) || die "No kernel was found in the system image."
+fi
+
+progress 71 "Writing the file system table…"
+if ((DRY)); then echo "+ genfstab -U $T > $T/etc/fstab"; else genfstab -U "$T" >"$T/etc/fstab"; fi
+# a real machine id now, so systemd doesn't treat the first boot as "first boot" (and prompt for settings)
+if ((DRY)); then echo "+ systemd-machine-id-setup --root=$T"; else rm -f "$T/etc/machine-id"; systemd-machine-id-setup --root="$T" >/dev/null; fi
+
+progress 73 "Removing the live session…"
+LIVE_FILES=(
+  /etc/sudoers.d/90-lumen-live
+  /etc/systemd/system/lumen-live-setup.service
+  /etc/systemd/system/multi-user.target.wants/lumen-live-setup.service
+  /usr/local/bin/lumen-live-setup /usr/local/bin/lumen-live-session
+  /etc/mkinitcpio.conf.d/archiso.conf
+  /etc/systemd/system/getty@tty1.service.d/autologin.conf
+  /etc/systemd/system/choose-mirror.service /etc/systemd/system/multi-user.target.wants/choose-mirror.service
+  /etc/systemd/system/livecd-alsa-unmuter.service /etc/systemd/system/sound.target.wants/livecd-alsa-unmuter.service
+  /etc/systemd/system/livecd-talk.service /etc/systemd/system/multi-user.target.wants/livecd-talk.service
+  /etc/systemd/system/pacman-init.service /etc/systemd/system/multi-user.target.wants/pacman-init.service
+  /etc/systemd/system/etc-pacman.d-gnupg.mount
+  /etc/systemd/system/multi-user.target.wants/hv_fcopy_daemon.service /etc/systemd/system/multi-user.target.wants/hv_kvp_daemon.service
+  /etc/systemd/system/multi-user.target.wants/hv_vss_daemon.service /etc/systemd/system/multi-user.target.wants/vboxservice.service
+  /etc/systemd/system/multi-user.target.wants/vmtoolsd.service /etc/systemd/system/multi-user.target.wants/vmware-vmblock-fuse.service
+  /etc/systemd/system/multi-user.target.wants/sshd.service /etc/systemd/system/multi-user.target.wants/iwd.service
+  /etc/systemd/journald.conf.d/volatile-storage.conf
+  /etc/systemd/logind.conf.d/do-not-suspend.conf
+  /etc/systemd/resolved.conf.d/archiso.conf
+  /etc/ssh/sshd_config.d/10-archiso.conf
+  /etc/systemd/system-generators/systemd-gpt-auto-generator
+  /root/.automated_script.sh /root/.zlogin
+  /usr/local/bin/choose-mirror /usr/local/bin/Installation_guide /usr/local/bin/livecd-sound
+)
+for f in "${LIVE_FILES[@]}"; do run rm -f "$T$f"; done
+run rm -rf "$T/etc/systemd/system/cloud-init.target.wants" "$T/usr/local/share/livecd-sound" "$T/home/lumen"
+# the live user only exists in a copy of the running system ("/" fallback); the squashfs never has it
+inchroot "userdel -r lumen >/dev/null 2>&1 || true"
+: | put /etc/motd
+
+progress 74 "Setting the language, time zone and keyboard…"
+inchroot "sed -i 's/^\([^#]\)/#\1/' /etc/locale.gen; printf '%s UTF-8\n' '$LOCALE' >> /etc/locale.gen; [ '$LOCALE' = en_US.UTF-8 ] || echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen; locale-gen"
+echo "LANG=$LOCALE" | put /etc/locale.conf
+run ln -sf "/usr/share/zoneinfo/$TIMEZONE" "$T/etc/localtime"
+((DRY)) || hwclock --systohc --utc 2>/dev/null || true
+# the text console's keymap: the X layout's name when kbd has one (gb is "uk" there)
+CONSOLE_KEYMAP=us
+case "$KB_LAYOUT" in gb) cand=uk ;; *) cand="$KB_LAYOUT" ;; esac
+if [ -n "$(find "$SRC/usr/share/kbd/keymaps" -name "$cand.map.gz" -print -quit 2>/dev/null)" ]; then CONSOLE_KEYMAP="$cand"; fi
+printf 'KEYMAP=%s\n' "$CONSOLE_KEYMAP" | put /etc/vconsole.conf
+put /etc/X11/xorg.conf.d/00-keyboard.conf <<EOF
+# Written by the Lumen installer
+Section "InputClass"
+        Identifier "system-keyboard"
+        MatchIsKeyboard "on"
+        Option "XkbLayout" "$KB_LAYOUT"
+        Option "XkbVariant" "$KB_VARIANT"
+EndSection
+EOF
+
+progress 76 "Naming the computer…"
+echo "$HOSTNAME_" | put /etc/hostname
+put /etc/hosts <<EOF
+127.0.0.1   localhost
+::1         localhost
+127.0.1.1   $HOSTNAME_.localdomain $HOSTNAME_
+EOF
+
+step account
+progress 78 "Creating your account…"
+GECOS="${FULLNAME//[:,]/ }"
+inchroot "useradd -m -G wheel,video -s /bin/bash -c $(printf '%q' "$GECOS") $USERNAME"
+printf '%s:%s\n' "$USERNAME" "$PASSWORD" | run_secret arch-chroot "$T" chpasswd
+if [ "$ROOTMODE" = same ]; then
+  printf 'root:%s\n' "$PASSWORD" | run_secret arch-chroot "$T" chpasswd
+else
+  inchroot "passwd -l root >/dev/null"
+fi
+echo '%wheel ALL=(ALL:ALL) ALL' | put /etc/sudoers.d/10-wheel 440
+# the picture the LiquidDesktop login screen shows (AccountsService's icon folder, plus ~/.face)
+if [[ "$AVATAR" == data:image/png\;base64,* ]]; then
+  if ((DRY)); then echo "+ write /var/lib/AccountsService/icons/$USERNAME (picture)"; else
+    mkdir -p "$T/var/lib/AccountsService/icons" "$T/var/lib/AccountsService/users"
+    base64 -d <<<"${AVATAR#data:image/png;base64,}" >"$T/var/lib/AccountsService/icons/$USERNAME"
+    printf '[User]\nIcon=/var/lib/AccountsService/icons/%s\nSystemAccount=false\n' "$USERNAME" >"$T/var/lib/AccountsService/users/$USERNAME"
+    chmod 644 "$T/var/lib/AccountsService/icons/$USERNAME"; chmod 600 "$T/var/lib/AccountsService/users/$USERNAME"
+    install -m 644 "$T/var/lib/AccountsService/icons/$USERNAME" "$T/home/$USERNAME/.face"
+    ln -sf .face "$T/home/$USERNAME/.face.icon"
+  fi
+fi
+inchroot "runuser -u $USERNAME -- env HOME=/home/$USERNAME LANG=$LOCALE xdg-user-dirs-update 2>/dev/null || true; chown -R $USERNAME: /home/$USERNAME"
+
+# ------------------------------------------------------------------ the login screen
+step login
+progress 81 "Setting up the LiquidDesktop login screen…"
+# exactly what LiquidDesktop's Settings › Lock Screen › Login Screen does (main/sddm.js, useWebGreeter):
+# greetd runs LiquidDesktop's own web login screen in cage, as the "greeter" user
+{
+  echo '# Written by the Lumen installer: the LiquidDesktop login screen (same as Settings › Lock Screen › Login Screen).'
+  echo '[terminal]'
+  echo 'vt = 1'
+  echo
+  echo '[default_session]'
+  # software cursor: cage's hardware cursor is drawn upside down on some GPUs (virtio-gpu in VMs, among others)
+  echo 'command = "env WLR_NO_HARDWARE_CURSORS=1 cage -s -d -- /usr/bin/liquid-desktop-greeter"'
+  echo 'user = "greeter"'
+  if [ "$AUTOLOGIN" = true ]; then
+    # log straight in at startup (only the first time; logging out shows the login screen)
+    echo
+    echo '[initial_session]'
+    echo 'command = "env XDG_SESSION_TYPE=x11 XDG_SESSION_DESKTOP=liquid-desktop XDG_CURRENT_DESKTOP=LiquidDesktop LIQUID_SKIP_LOGIN=1 startx /usr/bin/liquid-desktop-session -- vt1 -keeptty"'
+    echo "user = \"$USERNAME\""
+  fi
+} | put /etc/greetd/config.toml
+inchroot "getent passwd greeter >/dev/null || useradd -r -M -s /usr/bin/nologin -G video greeter; usermod -aG video greeter
+mkdir -p /var/cache/liquid-desktop-greeter && chown greeter:greeter /var/cache/liquid-desktop-greeter && chmod 750 /var/cache/liquid-desktop-greeter
+mkdir -p /var/lib/AccountsService/icons && chmod a+rx /var/lib/AccountsService /var/lib/AccountsService/icons"
+
+progress 83 "Turning on system services…"
+inchroot "systemctl disable sshd.service iwd.service systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service >/dev/null 2>&1 || true
+systemctl enable greetd.service NetworkManager.service bluetooth.service systemd-timesyncd.service systemd-resolved.service >/dev/null
+systemctl set-default graphical.target >/dev/null"
+if [ "$SWAP" = zram ]; then
+  printf '# Written by the Lumen installer: compressed swap in memory\n[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd\n' | put /etc/systemd/zram-generator.conf
+else
+  run rm -f "$T/etc/systemd/zram-generator.conf"
+fi
+
+progress 85 "Setting up the package manager…"
+inchroot "pacman-key --init >/dev/null 2>&1 && pacman-key --populate archlinux >/dev/null 2>&1 || echo 'pacman keyring: run “sudo pacman-key --init && sudo pacman-key --populate” later'"
+# the installer itself isn't needed any more
+inchroot "pacman -Q lumen-installer >/dev/null 2>&1 && pacman -Rns --noconfirm lumen-installer >/dev/null || true"
+
+# ------------------------------------------------------------------ 4. start-up
+step boot
+progress 87 "Building the start-up image…"
+put /etc/mkinitcpio.d/linux.preset <<'EOF'
+# mkinitcpio preset file for the 'linux' package
+ALL_kver="/boot/vmlinuz-linux"
+PRESETS=('default' 'fallback')
+default_image="/boot/initramfs-linux.img"
+fallback_image="/boot/initramfs-linux-fallback.img"
+fallback_options="-S autodetect"
+EOF
+CMDLINE_EXTRA=""
+if [ "$ENCRYPT" = true ]; then
+  put /etc/mkinitcpio.conf.d/10-lumen-encrypt.conf <<'EOF'
+# Written by the Lumen installer: unlock the encrypted disk at start-up
+HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt filesystems fsck)
+EOF
+  LUKS_UUID="$( ((DRY)) && echo 0000-dry-run || blkid -s UUID -o value "$ROOT_DEV")"
+  CMDLINE_EXTRA="rd.luks.name=$LUKS_UUID=cryptroot root=/dev/mapper/cryptroot"
+fi
+inchroot "mkinitcpio -P"
+
+progress 93 "Installing the boot loader…"
+inchroot "sed -i -e 's/^#\?GRUB_DISTRIBUTOR=.*/GRUB_DISTRIBUTOR=\"Lumen\"/' \
+  -e 's/^#\?GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet\"/' \
+  -e 's|^#\?GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"$CMDLINE_EXTRA\"|' /etc/default/grub
+$( [ "$MODE" = manual ] && echo "sed -i 's/^#\?GRUB_DISABLE_OS_PROBER=.*/GRUB_DISABLE_OS_PROBER=false/' /etc/default/grub; grep -q '^GRUB_DISABLE_OS_PROBER' /etc/default/grub || echo GRUB_DISABLE_OS_PROBER=false >> /etc/default/grub" )"
+if ((UEFI)); then
+  inchroot "grub-install --target=x86_64-efi --efi-directory=$ESP_MNT --bootloader-id=Lumen --recheck"
+  # a copy at the fallback path too, for firmware that forgets boot entries (not on a shared ESP)
+  [ "$MODE" = erase ] && inchroot "grub-install --target=x86_64-efi --efi-directory=$ESP_MNT --removable --recheck"
+else
+  inchroot "grub-install --target=i386-pc --recheck $BOOT_DISK"
+fi
+inchroot "grub-mkconfig -o /boot/grub/grub.cfg"
+
+progress 98 "Finishing up…"
+((DRY)) || sync
+cleanup || true
+trap - EXIT
+progress 100 "Lumen is installed."
+echo "@@DONE"
