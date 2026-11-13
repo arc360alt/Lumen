@@ -1,0 +1,2 @@
+- Customise the fastfetch ascii art and pre-install fastfetch
+- Add a custom Lumen plymouth bootscreen
