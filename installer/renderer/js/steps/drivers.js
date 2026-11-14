@@ -73,7 +73,7 @@ export default {
           h('div.group-title', 'NVIDIA Driver'),
           h('div.disks.choices',
             choiceCard('nvidia', 'NVIDIA', 'Recommended', ['NVIDIA’s own driver: full speed in games and 3D apps, Vulkan, CUDA and OpenCL, video encoding (NVENC), and reliable sleep.']),
-            choiceCard('nouveau', 'Open Source (Nouveau)', '', ['Fully open source, but slower and without CUDA. Fine for the desktop, not for gaming.'])),
+            choiceCard('nouveau', 'Open Source (Nouveau)', '', ['Fully open source, but without 3D acceleration on recent cards (the desktop draws in software) and without CUDA. Not for gaming.'])),
         );
         if (p.nvidia) {
           const boost = p.laptop ? ' Dynamic Boost is turned on too, sharing power between the processor and the graphics card.' : '';

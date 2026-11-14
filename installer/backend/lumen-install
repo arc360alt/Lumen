@@ -90,6 +90,7 @@ FORMAT_HOME="$(cfg .storage.formatHome)"
 NVIDIA="$(cfg .drivers.nvidia)"
 HYBRID="$(cfg .drivers.hybrid)"
 LAPTOP="$(cfg .drivers.laptop)"
+SOFTWARE_GL="$(cfg .drivers.softwareGl)"
 UEFI=0; [ -d /sys/firmware/efi ] && UEFI=1
 
 [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "The account name “$USERNAME” isn’t valid."
@@ -461,10 +462,19 @@ EOF
     # laptops: Dynamic Boost (shifts power between CPU and GPU on RTX 30 and newer laptops)
     [ "$LAPTOP" = true ] && inchroot "systemctl enable nvidia-powerd.service >/dev/null 2>&1 || true"
   else
+    [ "$HYBRID" = true ] || SOFTWARE_GL=true
     log "Using the open-source driver (nouveau) for the NVIDIA card. The NVIDIA driver can be installed later: sudo pacman -S nvidia-open nvidia-utils"
   fi
 else
   log "Graphics: the open-source drivers that come with Lumen (Mesa)."
+fi
+if [ "$SOFTWARE_GL" = true ]; then
+  # nouveau drives the screen: OpenGL on it shows only black on recent cards (compositor, Electron, login screen),
+  # so everything draws in software. Remove these lines after installing NVIDIA's driver.
+  log "Graphics: software rendering (nouveau drives the screen)."
+  printf '%s\n' '# Written by the Lumen installer: nouveau drives the screen, so draw in software.' \
+    '# Remove these lines after installing the NVIDIA driver (sudo pacman -S nvidia-open nvidia-utils).' \
+    'LIBGL_ALWAYS_SOFTWARE=1' 'GALLIUM_DRIVER=llvmpipe' | put /etc/environment
 fi
 
 # ------------------------------------------------------------------ 4. start-up

@@ -49,7 +49,7 @@ Other options: `--bios` (legacy BIOS), `--reset` (blank virtual disk), `--iso FI
 When it boots, the `lumen` user is logged straight into LiquidDesktop and **Install Lumen** opens. It's also on the desktop.
 If you log out, LiquidDesktop's login screen appears: user `lumen`, password `lumen`. The live user has passwordless sudo.
 SSH is off.
-The boot menu also has a **safe graphics** entry (`nouveau.modeset=0`), for NVIDIA cards that show a black screen with the open-source driver.
+When the open-source NVIDIA driver (nouveau) drives the screen, the live session draws in software (llvmpipe, picom's xrender backend), because OpenGL on nouveau shows only black on recent cards. The boot menu also has a **safe graphics** entry (`nouveau.modeset=0 lumen.safegfx=1`) that always draws in software.
 
 ## The installer — [installer/](installer/)
 

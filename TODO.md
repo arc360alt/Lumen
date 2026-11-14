@@ -1,4 +1,5 @@
 ## TODO:
+- Fix a REDICULOUS amount of grapical bugs happening on the live image on nvidia, this ranges from parts of the screen flashing, the boot screen persisting, dissapearing, and then showing again and not going away untill the system is not shut down(the boot screen inside the DE not the plymouth one) and the installer window just being blur and not having any content in it, it was just a paine of blur that I could move around. This might also be because of my 16:10 display on my laptop, but most of the other bugs seemed to be Grapical with software+nvidia rendering on this electron baised advanced DE. If any of these issues you think might be an issue with the DE, finish what your doing whth the OS, and then make a prompt for my agent on the DE that I can send to it to fix the issues you found to be related to the Desktop Enviroment instead of the OS.
 
 ## Completed:
 

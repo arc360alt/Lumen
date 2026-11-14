@@ -1,6 +1,24 @@
 #!/bin/sh
 # Lumen live session: LiquidDesktop, plus the installer opened once the desktop is up.
 # (LiquidDesktop doesn't run XDG autostart entries yet; once it does, this can become an autostart file.)
+
+# Graphics: when the open-source NVIDIA driver (nouveau) drives the screen, OpenGL on it is unreliable (on RTX 40 cards
+# the compositor and Electron draw only black). Draw in software instead: slower, but it always works. Also used for
+# the "safe graphics" boot entry (lumen.safegfx=1), and when there is no GPU driver at all.
+soft=0
+grep -qw 'lumen.safegfx=1' /proc/cmdline && soft=1
+for c in /sys/class/drm/card[0-9]*; do
+  [ -e "$c/device/boot_vga" ] || continue
+  [ "$(cat "$c/device/boot_vga")" = 1 ] || continue
+  drv="$(basename "$(readlink -f "$c/device/driver")")"
+  case "$drv" in nouveau|simpledrm|simple-framebuffer|efifb|"") soft=1 ;; esac
+done
+if [ "$soft" = 1 ]; then
+  export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
+  export LIQUID_PICOM_ARGS="--backend xrender $LIQUID_PICOM_ARGS"
+  echo "lumen-live-session: software rendering (screen driver: ${drv:-none})" >&2
+fi
+
 ( for i in $(seq 1 60); do
     xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q 'window id' && break
     sleep 1
