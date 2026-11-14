@@ -11,7 +11,9 @@
 #   user{fullName,username,password,autologin,avatar(data:image/png;base64,…)}, root ("same" | "locked"),
 #   storage{mode: "erase" | "manual", filesystem: ext4|btrfs|xfs, swap: zram|none,
 #           erase:  disk, encrypt, passphrase
-#           manual: root, efi, formatEfi, home, formatHome}
+#           manual: root, efi, formatEfi, home, formatHome},
+#   drivers{nvidia: bool (NVIDIA's driver instead of nouveau), hybrid: bool (NVIDIA + another GPU: PRIME offload),
+#           laptop: bool}
 #
 # Output for the UI: ordinary log lines, plus  @@PROGRESS <pct> <text>,  @@STEP <id>,  @@ERROR <text>,  @@DONE
 set -Eeuo pipefail
@@ -85,6 +87,9 @@ EFI_PART="$(cfg .storage.efi)"
 FORMAT_EFI="$(cfg .storage.formatEfi)"
 HOME_PART="$(cfg .storage.home)"
 FORMAT_HOME="$(cfg .storage.formatHome)"
+NVIDIA="$(cfg .drivers.nvidia)"
+HYBRID="$(cfg .drivers.hybrid)"
+LAPTOP="$(cfg .drivers.laptop)"
 UEFI=0; [ -d /sys/firmware/efi ] && UEFI=1
 
 [[ "$USERNAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "The account name “$USERNAME” isn’t valid."
@@ -215,7 +220,9 @@ fi
 # ------------------------------------------------------------------ 2. copy the system
 step copy
 progress 12 "Copying Lumen to the disk…"
-EXCLUDES=()
+# the NVIDIA driver repository on the ISO is only needed during the install (below), not on the disk
+DRIVER_REPO=/usr/share/lumen/drivers
+EXCLUDES=(--exclude="$DRIVER_REPO/")
 if [ "$SRC" = / ]; then
   for x in /dev/ /proc/ /sys/ /run/ /tmp/ /mnt/ /media/ /home/lumen/ /var/tmp/ /var/log/ /var/cache/pacman/pkg/ /lost+found /swapfile /etc/machine-id; do
     EXCLUDES+=(--exclude="$x*")
@@ -292,6 +299,15 @@ run rm -rf "$T/etc/systemd/system/cloud-init.target.wants" "$T/usr/local/share/l
 # the live user only exists in a copy of the running system ("/" fallback); the squashfs never has it
 inchroot "userdel -r lumen >/dev/null 2>&1 || true"
 : | put /etc/motd
+# the normal kernel preset instead of the live ISO's (before anything below installs packages, whose hooks use it)
+put /etc/mkinitcpio.d/linux.preset <<'EOF'
+# mkinitcpio preset file for the 'linux' package
+ALL_kver="/boot/vmlinuz-linux"
+PRESETS=('default' 'fallback')
+default_image="/boot/initramfs-linux.img"
+fallback_image="/boot/initramfs-linux-fallback.img"
+fallback_options="-S autodetect"
+EOF
 
 progress 74 "Setting the language, time zone and keyboard…"
 inchroot "sed -i 's/^\([^#]\)/#\1/' /etc/locale.gen; printf '%s UTF-8\n' '$LOCALE' >> /etc/locale.gen; [ '$LOCALE' = en_US.UTF-8 ] || echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen; locale-gen"
@@ -386,23 +402,83 @@ inchroot "pacman-key --init >/dev/null 2>&1 && pacman-key --populate archlinux >
 # the installer itself isn't needed any more
 inchroot "pacman -Q lumen-installer >/dev/null 2>&1 && pacman -Rns --noconfirm lumen-installer >/dev/null || true"
 
+# ------------------------------------------------------------------ graphics drivers
+step drivers
+NVIDIA_OK=0
+if [ "$NVIDIA" = true ]; then
+  progress 86 "Installing the NVIDIA driver…"
+  NV_PKGS=(nvidia-open nvidia-utils nvidia-settings libva-nvidia-driver opencl-nvidia)
+  [ "$HYBRID" = true ] && NV_PKGS+=(nvidia-prime)
+  REPO_SRC="${SRC%/}$DRIVER_REPO"
+  if [ -f "$REPO_SRC/lumen-drivers.db" ] || { ((DRY)) && [ ! -d "$REPO_SRC" ]; }; then
+    # offline, from the repository on the ISO. Its packages were downloaded from the Arch mirrors together with the
+    # rest of this ISO and arrive the same way as everything rsync copied above (the ISO is what's trusted), so
+    # pacman doesn't check signatures for this one repository. pacman copies them into the new system's package
+    # cache, and those copies are deleted afterwards.
+    run mkdir -p "$T/mnt/lumen-drivers"
+    run mount --bind -o ro "$REPO_SRC" "$T/mnt/lumen-drivers"
+    put /etc/pacman-lumen-drivers.conf <<'EOF'
+# temporary: the Lumen installer's NVIDIA driver repository (deleted after the install)
+[options]
+Architecture = auto
+SigLevel = Never
+
+[lumen-drivers]
+Server = file:///mnt/lumen-drivers
+EOF
+    inchroot "pacman --config /etc/pacman-lumen-drivers.conf -Sy --noconfirm --needed ${NV_PKGS[*]}" && NVIDIA_OK=1 \
+      || log "Couldn't install the NVIDIA driver from the ISO."
+    inchroot "rm -f /etc/pacman-lumen-drivers.conf /var/lib/pacman/sync/lumen-drivers.*
+for f in /mnt/lumen-drivers/*.pkg.tar.*; do rm -f \"/var/cache/pacman/pkg/\${f##*/}\"; done"
+    run umount "$T/mnt/lumen-drivers"
+    run rmdir "$T/mnt/lumen-drivers"
+  else
+    # this ISO was built without it (./build.sh --no-drivers): download it, if there's internet
+    inchroot "pacman -Sy --noconfirm --needed ${NV_PKGS[*]}" && NVIDIA_OK=1 \
+      || log "Couldn't download the NVIDIA driver (no internet?)."
+  fi
+  # the driver is built for one exact kernel: make sure it matches the installed one
+  if ((NVIDIA_OK)) && ! ((DRY)); then
+    KVER="$(basename "$(dirname "$(grep -lx linux "$T"/usr/lib/modules/*/pkgbase | head -1)")")"
+    if [ -z "$(find "$T/usr/lib/modules/$KVER" -name 'nvidia.ko*' -print -quit 2>/dev/null)" ]; then
+      log "The NVIDIA driver doesn't match the kernel ($KVER) — removing it again."
+      inchroot "pacman -Rns --noconfirm ${NV_PKGS[*]} >/dev/null 2>&1 || true"
+      NVIDIA_OK=0
+    fi
+  fi
+  if ((NVIDIA_OK)); then
+    log "NVIDIA driver installed: ${NV_PKGS[*]}"
+    # (nvidia-utils already blacklists nouveau and turns on modesetting; with these open kernel modules,
+    #  suspend and resume need no extra services)
+    if [ "$HYBRID" != true ]; then
+      # the NVIDIA card drives the screen: load the driver early, so the boot screen and the passphrase
+      # prompt appear on it in full resolution
+      put /etc/mkinitcpio.conf.d/20-lumen-nvidia.conf <<'EOF'
+# Written by the Lumen installer: load the NVIDIA driver early (boot screen on the NVIDIA card)
+MODULES+=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)
+EOF
+    fi
+    # laptops: Dynamic Boost (shifts power between CPU and GPU on RTX 30 and newer laptops)
+    [ "$LAPTOP" = true ] && inchroot "systemctl enable nvidia-powerd.service >/dev/null 2>&1 || true"
+  else
+    log "Using the open-source driver (nouveau) for the NVIDIA card. The NVIDIA driver can be installed later: sudo pacman -S nvidia-open nvidia-utils"
+  fi
+else
+  log "Graphics: the open-source drivers that come with Lumen (Mesa)."
+fi
+
 # ------------------------------------------------------------------ 4. start-up
 step boot
 progress 87 "Building the start-up image…"
-put /etc/mkinitcpio.d/linux.preset <<'EOF'
-# mkinitcpio preset file for the 'linux' package
-ALL_kver="/boot/vmlinuz-linux"
-PRESETS=('default' 'fallback')
-default_image="/boot/initramfs-linux.img"
-fallback_image="/boot/initramfs-linux-fallback.img"
-fallback_options="-S autodetect"
-EOF
 CMDLINE_EXTRA=""
-if [ "$ENCRYPT" = true ]; then
-  put /etc/mkinitcpio.conf.d/10-lumen-encrypt.conf <<'EOF'
-# Written by the Lumen installer: unlock the encrypted disk at start-up
-HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt filesystems fsck)
+# systemd-based start-up image with the Lumen boot screen (plymouth); sd-encrypt asks for the passphrase on it
+CRYPT_HOOK=""
+[ "$ENCRYPT" = true ] && CRYPT_HOOK=" sd-encrypt"
+put /etc/mkinitcpio.conf.d/10-lumen.conf <<EOF
+# Written by the Lumen installer: the Lumen boot screen$( [ "$ENCRYPT" = true ] && echo ", and unlocking the encrypted disk" )
+HOOKS=(base systemd plymouth autodetect microcode modconf kms keyboard sd-vconsole block$CRYPT_HOOK filesystems fsck)
 EOF
+if [ "$ENCRYPT" = true ]; then
   LUKS_UUID="$( ((DRY)) && echo 0000-dry-run || blkid -s UUID -o value "$ROOT_DEV")"
   CMDLINE_EXTRA="rd.luks.name=$LUKS_UUID=cryptroot root=/dev/mapper/cryptroot"
 fi
@@ -410,7 +486,7 @@ inchroot "mkinitcpio -P"
 
 progress 93 "Installing the boot loader…"
 inchroot "sed -i -e 's/^#\?GRUB_DISTRIBUTOR=.*/GRUB_DISTRIBUTOR=\"Lumen\"/' \
-  -e 's/^#\?GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet\"/' \
+  -e 's/^#\?GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet splash\"/' \
   -e 's|^#\?GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"$CMDLINE_EXTRA\"|' /etc/default/grub
 $( [ "$MODE" = manual ] && echo "sed -i 's/^#\?GRUB_DISABLE_OS_PROBER=.*/GRUB_DISABLE_OS_PROBER=false/' /etc/default/grub; grep -q '^GRUB_DISABLE_OS_PROBER' /etc/default/grub || echo GRUB_DISABLE_OS_PROBER=false >> /etc/default/grub" )"
 if ((UEFI)); then

@@ -129,7 +129,9 @@ xl2tpd
 zsh
 
 # ---------------------------------------------------------------- Lumen
-# the desktop and its login screen
+# the desktop and its login screen. LiquidDesktop's own dependencies come with liquid-desktop-git, and build.sh
+# adds every optional dependency listed in its PKGBUILD (newest commit) below this list, so nothing here needs updating
+# when LiquidDesktop adds one.
 liquid-desktop-git
 lumen-installer
 greetd
@@ -148,33 +150,45 @@ picom
 electron43
 kvantum
 sassc
+# boot screen and terminal greeting
+plymouth
+fastfetch
+# graphics: open-source drivers for every card. The NVIDIA driver is not installed here: build.sh bundles it
+# as a package repository on the ISO (/usr/share/lumen/drivers) and the installer adds it when it's chosen.
 mesa
 mesa-utils
 vulkan-radeon
 vulkan-intel
+vulkan-nouveau
+intel-media-driver
+libva-intel-driver
 xf86-video-amdgpu
 xf86-video-intel
 xf86-video-nouveau
 xf86-video-qxl
-# LiquidDesktop's Control Center and apps (its optional dependencies)
+pciutils
+# Wi-Fi and Bluetooth firmware (the releng list's linux-firmware pulls these in too; listed so they can't go
+# missing). Intel AX2xx, MediaTek MT7921/MT7922 and Realtek RTW89 cover current laptops, including the
+# Lenovo Legion Pro 5 16IRX8H, whatever card it shipped with.
+linux-firmware-intel
+linux-firmware-mediatek
+linux-firmware-realtek
+linux-firmware-atheros
+linux-firmware-broadcom
+wireless-regdb
+wpa_supplicant
+# the rest of the system around LiquidDesktop
 networkmanager
 pipewire
 pipewire-alsa
 pipewire-pulse
 wireplumber
 libpulse
-brightnessctl
 bluez
 bluez-utils
-playerctl
-upower
-glib2
 xdg-user-dirs
 xdg-desktop-portal
 xdg-desktop-portal-gtk
-xfce4-terminal
-pacman-contrib
-archlinux-appstream-data
 # apps from Flathub
 flatpak
 # fonts

@@ -4,6 +4,7 @@ const call = (ch, ...a) => ipcRenderer.invoke(ch, ...a).then((r) => { if (r && r
 contextBridge.exposeInMainWorld('lumen', {
   info: () => call('sys:info'),
   disks: () => call('sys:disks'),
+  gpus: () => call('sys:gpus'),
   locales: () => call('sys:locales'),
   timezones: () => call('sys:timezones'),
   keyboards: () => call('sys:keyboards'),

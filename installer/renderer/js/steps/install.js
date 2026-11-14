@@ -1,10 +1,10 @@
-// Step 7 — Install: runs the back end and shows its progress; ends with Restart (or what went wrong).
+// Step 8 — Install: runs the back end and shows its progress; ends with Restart (or what went wrong).
 import { h } from '../util.js';
 import { sym, logoBadge } from '../icons.js';
 import { state, api, installConfig, TEST } from '../state.js';
 import { alertDialog } from '../ui.js';
 
-const PHASES = [['disks', 'Preparing the disk'], ['copy', 'Copying Lumen'], ['system', 'Setting up the system'], ['account', 'Creating your account'], ['login', 'Setting up the login screen'], ['boot', 'Installing the boot loader']];
+const PHASES = [['disks', 'Preparing the disk'], ['copy', 'Copying Lumen'], ['system', 'Setting up the system'], ['account', 'Creating your account'], ['login', 'Setting up the login screen'], ['drivers', 'Installing drivers'], ['boot', 'Installing the boot loader']];
 let started = false, view = null;
 const run = { phase: null, value: 0, text: '', log: [], result: null, error: '' };
 

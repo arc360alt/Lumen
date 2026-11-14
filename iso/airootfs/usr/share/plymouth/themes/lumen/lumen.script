@@ -1,0 +1,162 @@
+// Lumen boot screen (Plymouth script theme): the Lumen drop in the middle of a black screen, a thin progress
+// bar under it, and a LiquidDesktop-style glass field when the encrypted disk needs its passphrase.
+// The images are made at 2x by tools/make-branding.sh and scaled here to the screen.
+
+Window.SetBackgroundTopColor(0, 0, 0);
+Window.SetBackgroundBottomColor(0, 0, 0);
+
+screen.w = Window.GetWidth();
+screen.h = Window.GetHeight();
+screen.x = Window.GetX();
+screen.y = Window.GetY();
+cx = screen.x + screen.w / 2;
+cy = screen.y + screen.h / 2;
+
+// everything is sized from the screen height, so it looks the same on a 768p laptop and a 4K monitor
+unit = screen.h / 1080;
+if (unit < 0.6) unit = 0.6;
+
+// ---------------------------------------------------------------- the logo
+logo.size = Math.Int(128 * unit);
+logo.image = Image("logo.png").Scale(logo.size, logo.size);
+logo.sprite = Sprite(logo.image);
+logo.y = cy - logo.size / 2 - Math.Int(40 * unit);
+logo.sprite.SetPosition(cx - logo.size / 2, logo.y, 10);
+
+// ---------------------------------------------------------------- the progress bar
+bar.w = Math.Int(200 * unit);
+bar.h = Math.Int(6 * unit);
+if (bar.h < 4) bar.h = 4;
+bar.x = cx - bar.w / 2;
+bar.y = logo.y + logo.size + Math.Int(64 * unit);
+bar.track = Sprite(Image("track.png").Scale(bar.w, bar.h));
+bar.track.SetPosition(bar.x, bar.y, 10);
+bar.fill_image = Image("fill.png");
+bar.fill = Sprite();
+bar.fill.SetPosition(bar.x, bar.y, 11);
+bar.target = 0;
+bar.shown = 0;
+bar.drawn_w = -1;
+bar.visible = 1;
+
+// shutting down / restarting: just the logo
+mode = Plymouth.GetMode();
+if (mode == "shutdown" || mode == "reboot") bar.visible = 0;
+
+fun set_bar_visible(v) {
+  global.bar.visible = v;
+  bar.track.SetOpacity(v);
+  bar.fill.SetOpacity(v);
+}
+set_bar_visible(bar.visible);
+
+fun boot_progress_cb(duration, progress) {
+  if (progress > global.bar.target) global.bar.target = progress;
+}
+Plymouth.SetBootProgressFunction(boot_progress_cb);
+
+// system updates and firmware updates report their own percentage
+fun system_update_cb(progress) {
+  global.bar.target = progress / 100;
+  set_bar_visible(1);
+}
+Plymouth.SetSystemUpdateFunction(system_update_cb);
+
+// ---------------------------------------------------------------- passphrase / questions
+entry.w = Math.Int(300 * unit);
+entry.h = Math.Int(38 * unit);
+entry.x = cx - entry.w / 2;
+entry.y = logo.y + logo.size + Math.Int(48 * unit);
+entry.box = Sprite(Image("entry.png").Scale(entry.w, entry.h));
+entry.box.SetPosition(entry.x, entry.y, 20);
+entry.box.SetOpacity(0);
+entry.prompt = Sprite();
+entry.prompt.SetOpacity(0);
+entry.text = Sprite();
+entry.bullet_size = Math.Int(9 * unit);
+if (entry.bullet_size < 6) entry.bullet_size = 6;
+entry.bullet_image = Image("bullet.png").Scale(entry.bullet_size, entry.bullet_size);
+entry.max_bullets = Math.Int((entry.w - 40 * unit) / (entry.bullet_size * 1.8));
+for (i = 0; i < entry.max_bullets; i++) {
+  bullets[i] = Sprite(entry.bullet_image);
+  bullets[i].SetOpacity(0);
+}
+font = "Sans " + Math.Int(15 * unit);
+font_small = "Sans " + Math.Int(13 * unit);
+
+fun show_prompt(prompt) {
+  img = Image.Text(prompt, 1, 1, 1, 0.85, font_small);
+  entry.prompt.SetImage(img);
+  entry.prompt.SetPosition(cx - img.GetWidth() / 2, entry.y - img.GetHeight() - Math.Int(14 * unit), 20);
+  entry.prompt.SetOpacity(1);
+  entry.box.SetOpacity(1);
+  set_bar_visible(0);
+}
+
+fun hide_entry() {
+  entry.box.SetOpacity(0);
+  entry.prompt.SetOpacity(0);
+  entry.text.SetOpacity(0);
+  for (i = 0; i < entry.max_bullets; i++) bullets[i].SetOpacity(0);
+}
+
+fun display_password_cb(prompt, count) {
+  if (prompt == "") prompt = "Enter the passphrase to unlock the disk";
+  show_prompt(prompt);
+  entry.text.SetOpacity(0);
+  n = count;
+  if (n > entry.max_bullets) n = entry.max_bullets;
+  gap = entry.bullet_size * 1.8;
+  left = cx - (n * gap - (gap - entry.bullet_size)) / 2;
+  for (i = 0; i < entry.max_bullets; i++) {
+    if (i < n) {
+      bullets[i].SetPosition(left + i * gap, entry.y + (entry.h - entry.bullet_size) / 2, 21);
+      bullets[i].SetOpacity(1);
+    } else {
+      bullets[i].SetOpacity(0);
+    }
+  }
+}
+Plymouth.SetDisplayPasswordFunction(display_password_cb);
+
+fun display_question_cb(prompt, answer) {
+  show_prompt(prompt);
+  for (i = 0; i < entry.max_bullets; i++) bullets[i].SetOpacity(0);
+  img = Image.Text(answer, 1, 1, 1, 1, font);
+  entry.text.SetImage(img);
+  entry.text.SetPosition(cx - img.GetWidth() / 2, entry.y + (entry.h - img.GetHeight()) / 2, 21);
+  entry.text.SetOpacity(1);
+}
+Plymouth.SetDisplayQuestionFunction(display_question_cb);
+
+fun display_normal_cb() {
+  hide_entry();
+  if (mode != "shutdown" && mode != "reboot") set_bar_visible(1);
+}
+Plymouth.SetDisplayNormalFunction(display_normal_cb);
+
+// ---------------------------------------------------------------- messages (e.g. "Checking the disk…")
+message.sprite = Sprite();
+fun message_cb(text) {
+  img = Image.Text(text, 1, 1, 1, 0.6, font_small);
+  message.sprite.SetImage(img);
+  message.sprite.SetPosition(cx - img.GetWidth() / 2, screen.y + screen.h - img.GetHeight() - Math.Int(48 * unit), 30);
+}
+Plymouth.SetMessageFunction(message_cb);
+
+// ---------------------------------------------------------------- animation: the bar glides towards its target
+fun refresh_cb() {
+  global.bar.shown = bar.shown + (bar.target - bar.shown) * 0.06;
+  w = Math.Int(bar.w * bar.shown);
+  if (w > bar.w) w = bar.w;
+  if (w != bar.drawn_w) {
+    global.bar.drawn_w = w;
+    if (w >= bar.h) {
+      bar.fill.SetImage(bar.fill_image.Scale(w, bar.h));
+      bar.fill.SetOpacity(bar.visible);
+    } else {
+      bar.fill.SetOpacity(0);
+    }
+  }
+}
+Plymouth.SetRefreshFunction(refresh_cb);

@@ -17,6 +17,8 @@ export const state = {
   user: { fullName: '', username: '', password: '', password2: '', autologin: false, avatarColor: 0, avatar: '' },
   hostname: '',
   hostnameEdited: false, usernameEdited: false,
+  // graphics: hw = main/system.js gpus(); nvidia = 'nvidia' | 'nouveau' (null until the cards are known)
+  drivers: { hw: null, nvidia: null, forceNvidia: false, redraw: null },
   root: 'locked',             // locked (use sudo, like macOS) | same (root gets the same password)
   disks: [],
 };
@@ -30,11 +32,22 @@ export function installConfig() {
     locale: state.locale, timezone: state.timezone, keyboard: { ...state.keyboard }, hostname: state.hostname,
     user: { fullName: state.user.fullName.trim(), username: state.user.username, password: state.user.password, autologin: state.user.autologin, avatar: state.user.avatar },
     root: state.root,
+    drivers: (({ nvidia, hybrid, laptop }) => ({ nvidia, hybrid, laptop }))(driverPlan()),
     storage: s.mode === 'erase'
       ? { mode: 'erase', disk: s.disk, filesystem: s.filesystem, swap: s.swap, encrypt: s.encrypt, passphrase: s.encrypt ? s.passphrase : '' }
       : { mode: 'manual', root: s.root, efi: s.efi, formatEfi: s.formatEfi, home: s.home, formatHome: s.formatHome, filesystem: s.filesystem, swap: s.swap },
   };
 }
+
+// what's decided, in one place: the Review step and the back end use it
+export function driverPlan() {
+  const g = state.drivers.hw || { gpus: [] };
+  const nvidiaCards = g.gpus.filter((x) => x.kind === 'nvidia');
+  const supported = nvidiaCards.some((x) => x.supported);
+  const nvidia = (supported && state.drivers.nvidia === 'nvidia') || (!nvidiaCards.length && state.drivers.forceNvidia);
+  return { nvidia, hybrid: nvidia && !!g.hybrid, laptop: !!g.laptop, nvidiaCards, supported };
+}
+
 
 export const RESERVED = new Set(['root', 'bin', 'daemon', 'mail', 'ftp', 'http', 'nobody', 'dbus', 'greeter', 'lumen', 'polkitd', 'git', 'avahi', 'colord', 'rtkit', 'usbmux', 'uuidd', 'adm', 'wheel', 'users', 'sys', 'tss']);
 export const validUsername = (u) => /^[a-z_][a-z0-9_-]{0,31}$/.test(u) && !RESERVED.has(u) && !u.startsWith('systemd-');

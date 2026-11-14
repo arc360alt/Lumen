@@ -8,11 +8,12 @@ import welcome from './steps/welcome.js';
 import locationStep from './steps/location.js';
 import keyboard from './steps/keyboard.js';
 import storage from './steps/storage.js';
+import drivers from './steps/drivers.js';
 import account from './steps/account.js';
 import review from './steps/review.js';
 import install from './steps/install.js';
 
-const STEPS = [welcome, locationStep, keyboard, storage, account, review, install];
+const STEPS = [welcome, locationStep, keyboard, storage, drivers, account, review, install];
 
 // light / dark: forced with --theme=, otherwise like LiquidDesktop's "Auto" (dark from 7 pm to 7 am)
 const root = document.documentElement;

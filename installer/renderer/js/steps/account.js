@@ -1,4 +1,4 @@
-// Step 5 — Account: who you are, your picture (shown on the LiquidDesktop login screen), password, computer name.
+// Step 6 — Account: who you are, your picture (shown on the LiquidDesktop login screen), password, computer name.
 import { h } from '../util.js';
 import { sym } from '../icons.js';
 import { state, changed, validUsername, validHostname, strength, RESERVED } from '../state.js';

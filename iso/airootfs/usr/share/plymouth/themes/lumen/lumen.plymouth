@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Lumen
+Description=The Lumen drop on black, with a thin progress bar and a glass passphrase field
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/lumen
+ScriptFile=/usr/share/plymouth/themes/lumen/lumen.script

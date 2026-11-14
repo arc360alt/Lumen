@@ -30,7 +30,7 @@ async function info({ test }) {
     test, live, canInstall: test || (live && sudo.ok), sudo: sudo.ok,
     uefi: exists('/sys/firmware/efi'), memory: os.totalmem(), cpu: cpu.trim(), host: os.hostname(),
     os: rel.PRETTY_NAME || 'Lumen', version: rel.VERSION_ID || rel.BUILD_ID || '', minBytes: MIN_BYTES,
-    partitionEditor: has('gparted'),
+    partitionEditor: has('gparted'), build: buildInfo(),
   };
 }
 
@@ -152,6 +152,73 @@ async function geoip() {
   return null;
 }
 
+/* ------------------------------------------------------------------ graphics cards (the Drivers step) */
+const DRIVER_REPO = '/usr/share/lumen/drivers';
+const VENDORS = { '10de': 'nvidia', '1002': 'amd', '8086': 'intel', '1af4': 'virtual', '1234': 'virtual', '15ad': 'virtual', '80ee': 'virtual', '1b36': 'virtual', '1414': 'virtual' };
+
+// "AD107M [GeForce RTX 4060 Max-Q / Mobile]" → "GeForce RTX 4060 Max-Q / Mobile"
+const niceName = (dev) => ((/\[([^\]]+)\]\s*$/.exec(dev) || [])[1] || dev).replace(/\s+/g, ' ').trim();
+
+function isLaptop() {
+  const chassis = +read('/sys/class/dmi/id/chassis_type').trim();
+  if ([8, 9, 10, 11, 14, 30, 31, 32].includes(chassis)) return true;
+  if (chassis) return false;
+  // no chassis type: a battery of the computer itself (not a wireless mouse's, whose scope is "Device")
+  try { return fs.readdirSync('/sys/class/power_supply').some((d) => read(`/sys/class/power_supply/${d}/type`).trim() === 'Battery' && read(`/sys/class/power_supply/${d}/scope`).trim() !== 'Device'); } catch { return false; }
+}
+
+// Pretend hardware for trying the Drivers step: LUMEN_FAKE_GPUS=laptop | desktop | old (test mode only)
+const FAKE = {
+  laptop: [
+    { slot: '0000:00:02.0', vendorId: '8086', deviceId: 'a788', vendorName: 'Intel Corporation', name: 'Raptor Lake-S UHD Graphics', driver: 'i915', boot: true },
+    { slot: '0000:01:00.0', vendorId: '10de', deviceId: '2860', vendorName: 'NVIDIA Corporation', name: 'GeForce RTX 4070 Max-Q / Mobile', driver: 'nouveau', boot: false },
+  ],
+  desktop: [{ slot: '0000:01:00.0', vendorId: '10de', deviceId: '2684', vendorName: 'NVIDIA Corporation', name: 'GeForce RTX 4090', driver: 'nouveau', boot: true }],
+  old: [{ slot: '0000:01:00.0', vendorId: '10de', deviceId: '1b80', vendorName: 'NVIDIA Corporation', name: 'GeForce GTX 1080', driver: 'nouveau', boot: true }],
+};
+
+async function gpus({ test }) {
+  let list = [];
+  const fake = test && FAKE[process.env.LUMEN_FAKE_GPUS];
+  if (fake) list = fake.map((g) => ({ ...g }));
+  else {
+    const base = '/sys/bus/pci/devices';
+    let slots = [];
+    try { slots = fs.readdirSync(base); } catch { /* no PCI */ }
+    for (const slot of slots) {
+      if (!read(`${base}/${slot}/class`).trim().startsWith('0x03')) continue;   // display controllers
+      const vendorId = read(`${base}/${slot}/vendor`).trim().replace(/^0x/, '');
+      const deviceId = read(`${base}/${slot}/device`).trim().replace(/^0x/, '');
+      let driver = '';
+      try { driver = path.basename(fs.readlinkSync(`${base}/${slot}/driver`)); } catch { /* none bound */ }
+      const r = await run('lspci', ['-vmm', '-s', slot]);
+      const field = (k) => (new RegExp(`^${k}:\\s*(.+)$`, 'm').exec(r.out) || [])[1] || '';
+      list.push({ slot, vendorId, deviceId, vendorName: field('Vendor'), name: niceName(field('Device')) || `Graphics card ${vendorId}:${deviceId}`, driver, boot: read(`${base}/${slot}/boot_vga`).trim() === '1' });
+    }
+  }
+  for (const g of list) {
+    g.kind = VENDORS[g.vendorId] || 'other';
+    // NVIDIA's current driver (the open kernel modules) supports Turing and newer: GTX 16xx, RTX 20xx and up
+    if (g.kind === 'nvidia') g.supported = parseInt(g.deviceId, 16) >= 0x1e00;
+    if (g.kind === 'intel') g.integrated = !/\bArc (A|B)\d/.test(g.name);
+    if (g.kind === 'amd') g.integrated = !/\b(RX|PRO W|Instinct|FirePro|HD \d{4})\b/.test(g.name) && /Graphics|Vega|Renoir|Cezanne|Rembrandt|Raphael|Phoenix|Strix|Hawk|Lucienne|Picasso|Barcelo|Mendocino|Granite|Krackan/.test(g.name);
+  }
+  const nvidia = list.filter((g) => g.kind === 'nvidia');
+  return {
+    gpus: list.sort((a, b) => b.boot - a.boot),
+    laptop: fake ? process.env.LUMEN_FAKE_GPUS === 'laptop' : isLaptop(),
+    // NVIDIA plus another graphics chip that drives the screen (most laptops): PRIME render offload
+    hybrid: nvidia.length > 0 && list.some((g) => g.kind === 'intel' || g.kind === 'amd'),
+    bundled: exists(path.join(DRIVER_REPO, 'lumen-drivers.db')),
+  };
+}
+
+function buildInfo() {
+  const out = {};
+  for (const l of read('/usr/share/lumen/build-info').split('\n')) { const m = /^(\w+)=(.*)$/.exec(l); if (m) out[m[1]] = m[2]; }
+  return out;
+}
+
 // GParted, for people who want to make room by hand. Waits until it's closed so the disk list can refresh.
 function partitionEditor() {
   return new Promise((res) => {
@@ -168,4 +235,4 @@ function reboot({ test }) {
   return { ok: true };
 }
 
-module.exports = { info, disks, locales, timezones, keyboards, setKeyboard, geoip, partitionEditor, reboot };
+module.exports = { info, gpus, disks, locales, timezones, keyboards, setKeyboard, geoip, partitionEditor, reboot };

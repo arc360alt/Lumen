@@ -43,6 +43,7 @@ app.whenReady().then(() => {
   const h = (ch, fn) => ipcMain.handle(ch, async (_e, ...a) => { try { return await fn(...a); } catch (err) { return { __error: String(err.message || err) }; } });
   h('sys:info', () => system.info({ test: TEST }));
   h('sys:disks', () => system.disks({ test: TEST }));
+  h('sys:gpus', () => system.gpus({ test: TEST }));
   h('sys:locales', () => system.locales());
   h('sys:timezones', () => system.timezones());
   h('sys:keyboards', () => system.keyboards());

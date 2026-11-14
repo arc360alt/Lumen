@@ -1,0 +1,18 @@
+              $1.ll.
+            $1.llllll.
+           $1.llllllll.
+         $1.llllllllllll$2.
+       $1.llllllllllll$2llll.
+      $1.lllllllllll$2lllllll.
+    $1.llllllllllll$2llllllllll.
+   $1.lllllllllll$2lllllllllllll$3.
+  $1.llllllllll$2lllllllllllll$3lll.
+ $1.lllllllll$2lllllllllllll$3llllll.
+$1.lllllllll$2llllllllllll$3lllllllll.
+$1.lllll$4oo$2lllllllllllll$3llllllllll.
+ $1lllll$4ooo$2llllllllll$3llllllllllll
+ $1.ll$2llll$4ooo$2llllll$3lllllllllllll.
+  $2.lllllll$4ooooo$3llllllllllllll.
+    $2.lllllllll$3lllllllllllll.
+      $2..llll$3llllllllllll..
+          $3....llll....

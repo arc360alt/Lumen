@@ -1,9 +1,10 @@
-// Step 6 — Review: everything chosen, with Edit links, and the last confirmation before the disk is touched.
+// Step 7 — Review: everything chosen, with Edit links, and the last confirmation before the disk is touched.
 import { h } from '../util.js';
 import { sym } from '../icons.js';
 import { state, TEST } from '../state.js';
 import { hero, alertDialog, fmtBytes, warnIcon } from '../ui.js';
 import { localeName } from './welcome.js';
+import { driverFor } from './drivers.js';
 
 const disk = () => state.disks.find((d) => d.path === state.storage.disk);
 const part = (p) => disk()?.parts.find((x) => x.path === p);
@@ -47,8 +48,11 @@ export default {
       ...section('Language & Region', 'welcome', [['Language', localeName(state.locale)], ['Time zone', state.timezone.replace(/_/g, ' ')]], goto),
       ...section('Keyboard', 'keyboard', [['Layout', state.keyboard.layout + (state.keyboard.variant ? ` (${state.keyboard.variant})` : '')]], goto),
       ...section('Storage', 'storage', storageRows, goto),
+      ...section('Drivers', 'drivers', (state.drivers.hw?.gpus || []).map((g) => [g.name, driverFor(g)])
+        .concat(!state.drivers.hw?.gpus.some((g) => g.kind === 'nvidia') && state.drivers.forceNvidia ? [['NVIDIA driver', 'Installed anyway']] : [])
+        .concat(state.drivers.hw?.gpus.length ? [] : [['Graphics', 'Basic display driver']]), goto),
       ...section('Account', 'account', [['Name', u.fullName], ['Account name', u.username], ['Computer name', state.hostname], ['Log in automatically', u.autologin ? 'Yes' : 'No'], ['Root account', state.root === 'same' ? 'On (same password)' : 'Off (use sudo)']], goto),
-      ...section('Software', 'welcome', [['System', 'Arch Linux (rolling), linux kernel'], ['Desktop', 'LiquidDesktop'], ['Login screen', 'LiquidDesktop login screen (greetd)'], ['Apps', 'Flatpak with Flathub, App Store']], goto),
+      ...section('Software', 'welcome', [['System', 'Arch Linux (rolling), linux kernel'], ['Desktop', 'LiquidDesktop' + (state.info?.build?.LIQUIDDESKTOP_VERSION ? ` ${state.info.build.LIQUIDDESKTOP_VERSION.replace(/-\d+$/, '')}` : '')], ['Boot screen', 'Lumen (Plymouth)'], ['Login screen', 'LiquidDesktop login screen (greetd)'], ['Apps', 'Flatpak with Flathub, App Store']], goto),
     ];
   },
 };
