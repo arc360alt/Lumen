@@ -50,7 +50,8 @@ export default {
       ...section('Storage', 'storage', storageRows, goto),
       ...section('Drivers', 'drivers', (state.drivers.hw?.gpus || []).map((g) => [g.name, driverFor(g)])
         .concat(!state.drivers.hw?.gpus.some((g) => g.kind === 'nvidia') && state.drivers.forceNvidia ? [['NVIDIA driver', 'Installed anyway']] : [])
-        .concat(state.drivers.hw?.gpus.length ? [] : [['Graphics', 'Basic display driver']]), goto),
+        .concat(state.drivers.hw?.gpus.length ? [] : [['Graphics', 'Basic display driver']])
+        .concat(state.drivers.hw?.hybrid && state.drivers.nvidia === 'nvidia' ? [['NVIDIA PRIME (prime-run)', state.drivers.prime ? 'Installed' : 'Not installed']] : []), goto),
       ...section('Account', 'account', [['Name', u.fullName], ['Account name', u.username], ['Computer name', state.hostname], ['Log in automatically', u.autologin ? 'Yes' : 'No'], ['Root account', state.root === 'same' ? 'On (same password)' : 'Off (use sudo)']], goto),
       ...section('Software', 'welcome', [['System', 'Arch Linux (rolling), linux kernel'], ['Desktop', 'LiquidDesktop' + (state.info?.build?.LIQUIDDESKTOP_VERSION ? ` ${state.info.build.LIQUIDDESKTOP_VERSION.replace(/-\d+$/, '')}` : '')], ['Boot screen', 'Lumen (Plymouth)'], ['Login screen', 'LiquidDesktop login screen (greetd)'], ['Apps', 'Flatpak with Flathub, App Store']], goto),
     ];

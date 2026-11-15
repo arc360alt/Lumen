@@ -14,7 +14,8 @@ for c in /sys/class/drm/card[0-9]*; do
   case "$drv" in nouveau|simpledrm|simple-framebuffer|efifb|"") soft=1 ;; esac
 done
 if [ "$soft" = 1 ]; then
-  export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
+  # LIQUID_SOFTWARE_RENDERING: for LiquidDesktop itself (see LIQUIDDESKTOP-REQUESTS.md, item 6)
+  export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe LIQUID_SOFTWARE_RENDERING=1 LUMEN_SOFTWARE_RENDERING=1
   export LIQUID_PICOM_ARGS="--backend xrender $LIQUID_PICOM_ARGS"
   echo "lumen-live-session: software rendering (screen driver: ${drv:-none})" >&2
 fi

@@ -26,6 +26,8 @@ pickTheme();
 setInterval(pickTheme, 60000);
 // inside LiquidDesktop the compositor blurs behind us only when it knows the window (see the README)
 if (params.get('blur') === '1') root.dataset.blur = 'true';
+// software rendering: a solid window (main/main.js)
+if (params.get('opaque') === '1') root.dataset.opaque = 'true';
 
 let index = 0, maxReached = 0, locked = false, lastIndex = 0;
 

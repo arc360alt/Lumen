@@ -1,0 +1,21 @@
+/* Software Update — only what the shared installer/LiquidDesktop styles don't have */
+.upd-hero { display: flex; align-items: center; gap: 18px; padding: 4px 4px 22px; }
+.upd-hero .big-logo { width: 72px; height: 72px; flex: none; filter: drop-shadow(0 8px 20px rgba(58, 123, 255, 0.3)); }
+.upd-hero h2 { margin: 0; font-size: 20px; letter-spacing: -0.01em; }
+.upd-hero p { margin: 4px 0 0; color: var(--text-2); font-size: 12.5px; line-height: 1.45; }
+.upd-hero .spacer { flex: 1; }
+.upd-hero .btn { height: 30px; padding: 0 16px; flex: none; }
+.commit { display: flex; gap: 10px; align-items: baseline; }
+.commit .label { min-width: 0; }
+.commit code, .files code { font: 11px ui-monospace, 'JetBrains Mono', monospace; color: var(--text-3); }
+.commit .when { margin-left: auto; color: var(--text-3); font-size: 11.5px; white-space: nowrap; }
+.sum .count { min-width: 26px; height: 20px; padding: 0 7px; border-radius: 999px; background: var(--hover); font-size: 11.5px; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+.sum .count.warn { background: rgba(255, 159, 10, 0.18); color: #ff9f0a; }
+.files { padding: 8px 14px 12px; max-height: 220px; overflow: auto; font-size: 11.5px; line-height: 1.7; }
+.files b { display: block; margin-top: 6px; font-size: 11px; color: var(--text-2); }
+.pw-field { width: 100%; margin-top: 12px; height: 30px; }
+.alert .pw-err { color: #ff453a; font-size: 12px; margin-top: 8px; min-height: 16px; }
+.upd-run { display: flex; flex-direction: column; align-items: center; text-align: center; padding-top: 30px; }
+.upd-run .big-logo { width: 88px; height: 88px; margin-bottom: 14px; }
+.upd-run h2 { margin: 0 0 6px; }
+.upd-run .status { color: var(--text-2); font-size: 12.5px; margin-bottom: 16px; min-height: 18px; }

@@ -153,8 +153,14 @@ sassc
 # boot screen and terminal greeting
 plymouth
 fastfetch
-# graphics: open-source drivers for every card. The NVIDIA driver is not installed here: build.sh bundles it
-# as a package repository on the ISO (/usr/share/lumen/drivers) and the installer adds it when it's chosen.
+# graphics: open-source drivers for every card, plus NVIDIA's driver (open kernel modules: GTX 16 / RTX 20 and
+# newer), so the live session runs properly on NVIDIA cards. The installer keeps it only when it's chosen.
+nvidia-open
+nvidia-utils
+nvidia-settings
+nvidia-prime
+libva-nvidia-driver
+opencl-nvidia
 mesa
 mesa-utils
 vulkan-radeon
@@ -163,7 +169,6 @@ vulkan-nouveau
 intel-media-driver
 libva-intel-driver
 xf86-video-amdgpu
-xf86-video-intel
 xf86-video-nouveau
 xf86-video-qxl
 pciutils
@@ -197,8 +202,9 @@ noto-fonts-emoji
 noto-fonts-cjk
 ttf-dejavu
 ttf-liberation
-# the installer's tools
+# the installer's and Software Update's tools
 jq
+git
 gparted
 zram-generator
 os-prober

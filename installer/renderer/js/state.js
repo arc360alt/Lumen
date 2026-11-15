@@ -18,7 +18,7 @@ export const state = {
   hostname: '',
   hostnameEdited: false, usernameEdited: false,
   // graphics: hw = main/system.js gpus(); nvidia = 'nvidia' | 'nouveau' (null until the cards are known)
-  drivers: { hw: null, nvidia: null, forceNvidia: false, redraw: null },
+  drivers: { hw: null, nvidia: null, forceNvidia: false, prime: true, redraw: null },
   root: 'locked',             // locked (use sudo, like macOS) | same (root gets the same password)
   disks: [],
 };
@@ -32,7 +32,7 @@ export function installConfig() {
     locale: state.locale, timezone: state.timezone, keyboard: { ...state.keyboard }, hostname: state.hostname,
     user: { fullName: state.user.fullName.trim(), username: state.user.username, password: state.user.password, autologin: state.user.autologin, avatar: state.user.avatar },
     root: state.root,
-    drivers: (({ nvidia, hybrid, laptop, nvidiaCards }) => ({ nvidia, hybrid, laptop,
+    drivers: (({ nvidia, hybrid, laptop, nvidiaCards }) => ({ nvidia, hybrid, laptop, prime: hybrid && state.drivers.prime,
       // nouveau drives the screen (no Intel/AMD chip next to the NVIDIA card): draw in software, OpenGL on nouveau
       // shows only black on recent cards
       softwareGl: !nvidia && nvidiaCards.length > 0 && !state.drivers.hw?.hybrid }))(driverPlan()),

@@ -1,0 +1,12 @@
+{
+  "name": "lumen-update",
+  "productName": "Software Update",
+  "version": "1.0.0",
+  "description": "Lumen's Software Update: keeps the system in step with the Lumen repository. Built like LiquidDesktop's apps.",
+  "main": "main/main.js",
+  "license": "MIT",
+  "scripts": {
+    "start": "env -u ELECTRON_RUN_AS_NODE electron43 . --test",
+    "dev": "env -u ELECTRON_RUN_AS_NODE electron43 . --test --devtools"
+  }
+}

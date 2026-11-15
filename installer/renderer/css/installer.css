@@ -169,3 +169,7 @@ html, body { background: transparent; }
 .disk.choice b { display: flex; align-items: center; gap: 8px; font-size: 13.5px; margin-bottom: 2px; }
 .disk.choice .size { line-height: 1.45; padding-right: 18px; }
 .disk.choice .badge { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 999px; background: rgba(var(--accent-rgb), 0.15); color: var(--accent); }
+
+/* software rendering (main/main.js): a solid, square window — no transparency to draw through */
+:root[data-opaque='true'], :root[data-opaque='true'] body { background: rgb(var(--win-rgb)); }
+:root[data-opaque='true'] .win.inst { --win-alpha: 1; border-radius: 0; box-shadow: none; }

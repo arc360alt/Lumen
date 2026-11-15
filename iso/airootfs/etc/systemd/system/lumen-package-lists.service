@@ -1,0 +1,21 @@
+# Lumen: download pacman's package lists once on a newly installed system (an install has none yet, so installing
+# software — the App Store included — would fail until "pacman -Sy" ran). Without internet yet (Wi-Fi not set up),
+# it tries again every minute until it works; after that it never runs again. Not on the live USB.
+[Unit]
+Description=Lumen: download the package lists after installing
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=!/var/lib/lumen/package-lists-ready
+ConditionPathIsDirectory=!/run/archiso
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/pacman -Sy --noconfirm
+ExecStartPost=/usr/bin/mkdir -p /var/lib/lumen
+ExecStartPost=/usr/bin/touch /var/lib/lumen/package-lists-ready
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target

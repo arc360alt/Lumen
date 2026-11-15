@@ -153,7 +153,6 @@ async function geoip() {
 }
 
 /* ------------------------------------------------------------------ graphics cards (the Drivers step) */
-const DRIVER_REPO = '/usr/share/lumen/drivers';
 const VENDORS = { '10de': 'nvidia', '1002': 'amd', '8086': 'intel', '1af4': 'virtual', '1234': 'virtual', '15ad': 'virtual', '80ee': 'virtual', '1b36': 'virtual', '1414': 'virtual' };
 
 // "AD107M [GeForce RTX 4060 Max-Q / Mobile]" → "GeForce RTX 4060 Max-Q / Mobile"
@@ -209,7 +208,8 @@ async function gpus({ test }) {
     laptop: fake ? process.env.LUMEN_FAKE_GPUS === 'laptop' : isLaptop(),
     // NVIDIA plus another graphics chip that drives the screen (most laptops): PRIME render offload
     hybrid: nvidia.length > 0 && list.some((g) => g.kind === 'intel' || g.kind === 'amd'),
-    bundled: exists(path.join(DRIVER_REPO, 'lumen-drivers.db')),
+    // the live system comes with NVIDIA's driver; an ISO without it downloads it while installing
+    bundled: exists('/usr/bin/nvidia-smi'),
   };
 }
 

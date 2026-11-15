@@ -1,0 +1,90 @@
+#!/bin/sh
+# lumen-graphics — hardware or software rendering for the whole system.
+#
+#   lumen-graphics                show the current setting and what the screen uses
+#   sudo lumen-graphics auto      software rendering only when no real GPU driver drives the screen (default)
+#   sudo lumen-graphics hardware  always use the GPU
+#   sudo lumen-graphics software  always draw in software (llvmpipe): for broken drivers
+#
+# It runs at every start-up (lumen-graphics.service, before the login screen), so installing or removing a driver
+# (like NVIDIA's) is picked up by itself. Takes effect at the next login.
+CONF=/etc/lumen/graphics
+ENV=/etc/environment
+BEGIN='# >>> lumen-graphics (managed: use "lumen-graphics" to change) >>>'
+END='# <<< lumen-graphics <<<'
+
+mode() { sed -n 's/^mode=//p' "$CONF" 2>/dev/null | head -1 | grep -E '^(auto|hardware|software)$' || echo auto; }
+
+# the kernel driver of the graphics card that drives the screen (boot_vga), or "none"
+screen_driver() {
+  d=none
+  for c in /sys/bus/pci/devices/*; do
+    case "$(cat "$c/class" 2>/dev/null)" in 0x03*) ;; *) continue ;; esac
+    [ "$(cat "$c/boot_vga" 2>/dev/null)" = 1 ] || continue
+    [ -e "$c/driver" ] && d="$(basename "$(readlink -f "$c/driver")")"
+  done
+  echo "$d"
+}
+
+# wait (up to 20 s) until every graphics card has its driver, and NVIDIA's DRM part is up:
+# NVIDIA's driver loads after the start-up image, and starting X before it's ready fails
+wait_gpu() {
+  i=0
+  while [ $i -lt 40 ]; do
+    ready=1
+    for c in /sys/bus/pci/devices/*; do
+      case "$(cat "$c/class" 2>/dev/null)" in 0x03*) ;; *) continue ;; esac
+      [ -e "$c/driver" ] || ready=0
+      [ "$(basename "$(readlink -f "$c/driver" 2>/dev/null)")" = nvidia ] && [ ! -d /sys/module/nvidia_drm ] && ready=0
+    done
+    [ $ready = 1 ] && [ -n "$(ls /dev/dri/card* 2>/dev/null)" ] && return 0
+    sleep 0.5; i=$((i + 1))
+  done
+}
+
+want_software() {
+  case "$(mode)" in
+    software) return 0 ;;
+    hardware) return 1 ;;
+  esac
+  case "$(screen_driver)" in nouveau|simpledrm|simple-framebuffer|efifb|vesafb|none) return 0 ;; esac
+  grep -qw 'lumen.safegfx=1' /proc/cmdline
+}
+
+apply() {
+  touch "$ENV"
+  tmp="$(mktemp)"
+  sed "/^$(printf '%s' "$BEGIN" | sed 's/[]\/$*.^[]/\\&/g')\$/,/^$(printf '%s' "$END" | sed 's/[]\/$*.^[]/\\&/g')\$/d" "$ENV" >"$tmp"
+  # older Lumen installs wrote these lines without the markers
+  sed -i -e '/^# Written by the Lumen installer: nouveau drives the screen/d' -e '/^# Remove these lines after installing the NVIDIA driver/d' \
+         -e '/^LIBGL_ALWAYS_SOFTWARE=1$/d' -e '/^GALLIUM_DRIVER=llvmpipe$/d' "$tmp"
+  if ! want_software && [ "$(screen_driver)" = nvidia ]; then
+    # NVIDIA's driver drives the screen: picom's OpenGL backend needs a sync fence there, or window contents never
+    # show (black windows / background while the dock and menu bar draw)
+    printf '%s\n' "$BEGIN" 'LIQUID_PICOM_ARGS="--xrender-sync-fence"' "$END" >>"$tmp"
+  elif want_software; then
+    # (picom's xrender backend: its OpenGL one shows black / flashes without a GPU)
+    printf '%s\n' "$BEGIN" 'LIBGL_ALWAYS_SOFTWARE=1' 'GALLIUM_DRIVER=llvmpipe' 'LIQUID_SOFTWARE_RENDERING=1' \
+      'LIQUID_PICOM_ARGS="--backend xrender"' "$END" >>"$tmp"
+  fi
+  cat "$tmp" >"$ENV"; chmod 644 "$ENV"; rm -f "$tmp"
+}
+
+status() {
+  if grep -qx 'LIBGL_ALWAYS_SOFTWARE=1' "$ENV" 2>/dev/null; then r=software; else r=hardware; fi
+  grep -q 'xrender-sync-fence' "$ENV" 2>/dev/null && r="$r (NVIDIA: picom sync fence on)"
+  echo "Setting:   $(mode)"
+  echo "Screen:    $(screen_driver) driver"
+  echo "Rendering: $r (from the last start-up or change; applies to new logins)"
+}
+
+case "${1:-status}" in
+  status) status ;;
+  apply) [ "$2" = --wait ] && wait_gpu; apply ;;
+  auto|hardware|software)
+    [ "$(id -u)" = 0 ] || { echo "Run it with sudo: sudo lumen-graphics $1" >&2; exit 1; }
+    mkdir -p /etc/lumen; printf 'mode=%s\n' "$1" >"$CONF"; apply; status
+    echo "Log out and back in (or restart) for it to take effect." ;;
+  -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) echo "Unknown: $1 (try lumen-graphics --help)" >&2; exit 1 ;;
+esac

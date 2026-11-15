@@ -1,0 +1,10 @@
+[Unit]
+Description=Lumen: hardware or software rendering, from the graphics driver in use
+Documentation=file:/usr/bin/lumen-graphics
+After=systemd-udev-trigger.service systemd-modules-load.service
+Before=display-manager.service greetd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/lumen-graphics apply --wait
+RemainAfterExit=yes

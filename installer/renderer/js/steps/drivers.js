@@ -77,10 +77,13 @@ export default {
         );
         if (p.nvidia) {
           const boost = p.laptop ? ' Dynamic Boost is turned on too, sharing power between the processor and the graphics card.' : '';
+          const igpu = others.map((g) => VENDOR[g.kind].label).join(' / ');
           wrap.append(...[
-            p.hybrid
-              ? note('info', `Hybrid graphics: the desktop runs on the ${others.map((g) => VENDOR[g.kind].label).join(' / ')} graphics to save battery, and the NVIDIA card turns on when an app needs it. To run a game or app on the NVIDIA card, start it with “prime-run” (in Steam, set its launch options to “prime-run %command%”).${boost}`)
-              : boost ? note('info', boost.trim()) : null,
+            p.hybrid ? h('div.group', { style: { marginTop: '12px' } },
+              row('Install NVIDIA PRIME (prime-run)', toggle(D().prime, (v) => { D().prime = v; changed(); draw(); }),
+                `Hybrid graphics: the desktop runs on the ${igpu} graphics to save battery. With PRIME you choose when an app or game uses the NVIDIA card instead: start it with “prime-run” (in Steam, set its launch options to “prime-run %command%”).`)) : null,
+            p.hybrid && !D().prime ? note('info', `Without PRIME, everything runs on the ${igpu} graphics unless an app picks the NVIDIA card itself. You can add it later: sudo pacman -S nvidia-prime`) : null,
+            boost ? note('info', boost.trim()) : null,
             !hw.bundled && !TEST ? note('warn', 'This copy of Lumen doesn’t include the NVIDIA driver, so it’s downloaded while installing. Connect to the internet first.') : null,
           ].filter(Boolean));
         }

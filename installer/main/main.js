@@ -13,8 +13,14 @@ const argv = process.argv.slice(1);
 const TEST = argv.includes('--test') || process.env.LUMEN_INSTALLER_TEST === '1';
 const themeArg = (argv.find((a) => a.startsWith('--theme=')) || '').slice(8);
 
-app.commandLine.appendSwitch('enable-gpu-rasterization');
-app.commandLine.appendSwitch('ignore-gpu-blocklist');
+// software rendering (nouveau, no GPU driver, "safe graphics"): Chromium's GPU path over llvmpipe and transparent
+// windows draw nothing but an empty pane there, so use Chromium's own software renderer and a solid window
+const SOFTWARE = process.env.LIBGL_ALWAYS_SOFTWARE === '1' || process.env.LUMEN_SOFTWARE_RENDERING === '1' || argv.includes('--software');
+if (SOFTWARE) app.disableHardwareAcceleration();
+else {
+  app.commandLine.appendSwitch('enable-gpu-rasterization');
+  app.commandLine.appendSwitch('ignore-gpu-blocklist');
+}
 app.setName('Install Lumen');
 app.setDesktopName('lumen-installer.desktop');
 
@@ -23,12 +29,12 @@ function create() {
   const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
   win = new BrowserWindow({
     width: Math.min(980, sw - 40), height: Math.min(680, sh - 60), minWidth: 820, minHeight: 580,
-    title: 'Install Lumen', frame: false, transparent: true, backgroundColor: '#00000000', show: false, center: true,
+    title: 'Install Lumen', frame: false, transparent: !SOFTWARE, backgroundColor: SOFTWARE ? (themeArg === 'light' ? '#f2f2f7' : '#1c1c1e') : '#00000000', show: false, center: true,
     icon: path.join(__dirname, '..', 'renderer', 'img', 'lumen.png'),
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: false },
   });
   win.setMenu(null);
-  win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'), { query: { test: TEST ? '1' : '0', theme: themeArg, blur: argv.includes('--blur') ? '1' : '0' } });
+  win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'), { query: { test: TEST ? '1' : '0', theme: themeArg, blur: argv.includes('--blur') ? '1' : '0', opaque: SOFTWARE ? '1' : '0' } });
   win.once('ready-to-show', () => { win.show(); if (argv.includes('--devtools')) win.webContents.openDevTools({ mode: 'detach' }); });
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.on('maximize', () => win.webContents.send('win:state', { maximized: true }));

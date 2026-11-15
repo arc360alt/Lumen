@@ -1,0 +1,17 @@
+#!/bin/sh
+# Software Update. --test: check for real, but only simulate installing (no root, nothing changed). --devtools: inspector.
+HERE="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+unset ELECTRON_RUN_AS_NODE
+[ -z "$XCURSOR_THEME" ] && [ -d /usr/lib/liquid-desktop/session/cursors/MacOS-Tahoe-Cursor ] && export XCURSOR_THEME=MacOS-Tahoe-Cursor \
+  XCURSOR_PATH="/usr/lib/liquid-desktop/session/cursors:${XCURSOR_PATH:-/usr/share/icons}"
+# started from the app menu (no terminal): keep what Electron prints, so a failed start can be looked at
+if [ ! -t 2 ]; then
+  LOG="${XDG_CACHE_HOME:-$HOME/.cache}/lumen-update/app.log"
+  mkdir -p "$(dirname "$LOG")" && exec >>"$LOG" 2>&1 && echo "--- $(date) lumen-updater $*"
+fi
+for E in "$LUMEN_ELECTRON" "$(command -v electron43)" "$(command -v electron)"; do
+  [ -n "$E" ] && [ -x "$E" ] && exec "$E" "$HERE" "$@"
+done
+echo "lumen-updater: Electron not found (install electron43)" >&2
+command -v notify-send >/dev/null && notify-send "Software Update" "Couldn’t start: Electron (electron43) is missing."
+exit 1

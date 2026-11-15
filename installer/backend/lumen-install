@@ -12,7 +12,7 @@
 #   storage{mode: "erase" | "manual", filesystem: ext4|btrfs|xfs, swap: zram|none,
 #           erase:  disk, encrypt, passphrase
 #           manual: root, efi, formatEfi, home, formatHome},
-#   drivers{nvidia: bool (NVIDIA's driver instead of nouveau), hybrid: bool (NVIDIA + another GPU: PRIME offload),
+#   drivers{nvidia: bool (NVIDIA's driver instead of nouveau), hybrid: bool (NVIDIA + another GPU), prime: bool (nvidia-prime),
 #           laptop: bool}
 #
 # Output for the UI: ordinary log lines, plus  @@PROGRESS <pct> <text>,  @@STEP <id>,  @@ERROR <text>,  @@DONE
@@ -89,6 +89,8 @@ HOME_PART="$(cfg .storage.home)"
 FORMAT_HOME="$(cfg .storage.formatHome)"
 NVIDIA="$(cfg .drivers.nvidia)"
 HYBRID="$(cfg .drivers.hybrid)"
+PRIME="$(jq -r '.drivers.prime | if . == null then empty else tostring end' <<<"$CONFIG")"
+[ -n "$PRIME" ] || PRIME="$HYBRID"   # older installers: PRIME whenever hybrid
 LAPTOP="$(cfg .drivers.laptop)"
 SOFTWARE_GL="$(cfg .drivers.softwareGl)"
 UEFI=0; [ -d /sys/firmware/efi ] && UEFI=1
@@ -221,9 +223,7 @@ fi
 # ------------------------------------------------------------------ 2. copy the system
 step copy
 progress 12 "Copying Lumen to the disk…"
-# the NVIDIA driver repository on the ISO is only needed during the install (below), not on the disk
-DRIVER_REPO=/usr/share/lumen/drivers
-EXCLUDES=(--exclude="$DRIVER_REPO/")
+EXCLUDES=()
 if [ "$SRC" = / ]; then
   for x in /dev/ /proc/ /sys/ /run/ /tmp/ /mnt/ /media/ /home/lumen/ /var/tmp/ /var/log/ /var/cache/pacman/pkg/ /lost+found /swapfile /etc/machine-id; do
     EXCLUDES+=(--exclude="$x*")
@@ -406,35 +406,19 @@ inchroot "pacman -Q lumen-installer >/dev/null 2>&1 && pacman -Rns --noconfirm l
 # ------------------------------------------------------------------ graphics drivers
 step drivers
 NVIDIA_OK=0
+# the live system comes with NVIDIA's driver (so its own session works on NVIDIA cards): keep it or remove it
+NV_PKGS=(nvidia-open nvidia-utils nvidia-settings nvidia-prime libva-nvidia-driver opencl-nvidia)
+# (only the ones that are installed: pacman -R refuses the whole list if one is missing)
+NV_REMOVE="p=\$(pacman -Qq ${NV_PKGS[*]} 2>/dev/null || true); [ -z \"\$p\" ] || pacman -Rns --noconfirm \$p >/dev/null"
 if [ "$NVIDIA" = true ]; then
-  progress 86 "Installing the NVIDIA driver…"
-  NV_PKGS=(nvidia-open nvidia-utils nvidia-settings libva-nvidia-driver opencl-nvidia)
-  [ "$HYBRID" = true ] && NV_PKGS+=(nvidia-prime)
-  REPO_SRC="${SRC%/}$DRIVER_REPO"
-  if [ -f "$REPO_SRC/lumen-drivers.db" ] || { ((DRY)) && [ ! -d "$REPO_SRC" ]; }; then
-    # offline, from the repository on the ISO. Its packages were downloaded from the Arch mirrors together with the
-    # rest of this ISO and arrive the same way as everything rsync copied above (the ISO is what's trusted), so
-    # pacman doesn't check signatures for this one repository. pacman copies them into the new system's package
-    # cache, and those copies are deleted afterwards.
-    run mkdir -p "$T/mnt/lumen-drivers"
-    run mount --bind -o ro "$REPO_SRC" "$T/mnt/lumen-drivers"
-    put /etc/pacman-lumen-drivers.conf <<'EOF'
-# temporary: the Lumen installer's NVIDIA driver repository (deleted after the install)
-[options]
-Architecture = auto
-SigLevel = Never
-
-[lumen-drivers]
-Server = file:///mnt/lumen-drivers
-EOF
-    inchroot "pacman --config /etc/pacman-lumen-drivers.conf -Sy --noconfirm --needed ${NV_PKGS[*]}" && NVIDIA_OK=1 \
-      || log "Couldn't install the NVIDIA driver from the ISO."
-    inchroot "rm -f /etc/pacman-lumen-drivers.conf /var/lib/pacman/sync/lumen-drivers.*
-for f in /mnt/lumen-drivers/*.pkg.tar.*; do rm -f \"/var/cache/pacman/pkg/\${f##*/}\"; done"
-    run umount "$T/mnt/lumen-drivers"
-    run rmdir "$T/mnt/lumen-drivers"
+  progress 86 "Setting up the NVIDIA driver…"
+  if inchroot "pacman -Q nvidia-open nvidia-utils >/dev/null"; then
+    NVIDIA_OK=1
+    # PRIME render offload (prime-run): when chosen, and only useful next to another graphics chip
+    if [ "$HYBRID" = true ] && [ "$PRIME" = true ]; then log "NVIDIA PRIME (prime-run) installed."
+    else inchroot "pacman -Rns --noconfirm nvidia-prime >/dev/null 2>&1 || true"; fi
   else
-    # this ISO was built without it (./build.sh --no-drivers): download it, if there's internet
+    # an ISO without it: download it, if there's internet
     inchroot "pacman -Sy --noconfirm --needed ${NV_PKGS[*]}" && NVIDIA_OK=1 \
       || log "Couldn't download the NVIDIA driver (no internet?)."
   fi
@@ -443,7 +427,7 @@ for f in /mnt/lumen-drivers/*.pkg.tar.*; do rm -f \"/var/cache/pacman/pkg/\${f##
     KVER="$(basename "$(dirname "$(grep -lx linux "$T"/usr/lib/modules/*/pkgbase | head -1)")")"
     if [ -z "$(find "$T/usr/lib/modules/$KVER" -name 'nvidia.ko*' -print -quit 2>/dev/null)" ]; then
       log "The NVIDIA driver doesn't match the kernel ($KVER) — removing it again."
-      inchroot "pacman -Rns --noconfirm ${NV_PKGS[*]} >/dev/null 2>&1 || true"
+      inchroot "$NV_REMOVE"
       NVIDIA_OK=0
     fi
   fi
@@ -463,19 +447,17 @@ EOF
     [ "$LAPTOP" = true ] && inchroot "systemctl enable nvidia-powerd.service >/dev/null 2>&1 || true"
   else
     [ "$HYBRID" = true ] || SOFTWARE_GL=true
+    inchroot "$NV_REMOVE"
     log "Using the open-source driver (nouveau) for the NVIDIA card. The NVIDIA driver can be installed later: sudo pacman -S nvidia-open nvidia-utils"
   fi
 else
+  progress 86 "Removing drivers this computer doesn't need…"
+  inchroot "$NV_REMOVE"
   log "Graphics: the open-source drivers that come with Lumen (Mesa)."
 fi
-if [ "$SOFTWARE_GL" = true ]; then
-  # nouveau drives the screen: OpenGL on it shows only black on recent cards (compositor, Electron, login screen),
-  # so everything draws in software. Remove these lines after installing NVIDIA's driver.
-  log "Graphics: software rendering (nouveau drives the screen)."
-  printf '%s\n' '# Written by the Lumen installer: nouveau drives the screen, so draw in software.' \
-    '# Remove these lines after installing the NVIDIA driver (sudo pacman -S nvidia-open nvidia-utils).' \
-    'LIBGL_ALWAYS_SOFTWARE=1' 'GALLIUM_DRIVER=llvmpipe' | put /etc/environment
-fi
+# hardware vs software rendering is decided at every start-up by lumen-graphics.service (pulled in by greetd):
+# software only while no real GPU driver drives the screen, so installing NVIDIA's driver later just works.
+[ "$SOFTWARE_GL" = true ] && log "Graphics: nouveau drives the screen, so Lumen will draw in software until NVIDIA's driver is installed (see: lumen-graphics)."
 
 # ------------------------------------------------------------------ 4. start-up
 step boot
@@ -503,6 +485,18 @@ if ((UEFI)); then
   inchroot "grub-install --target=x86_64-efi --efi-directory=$ESP_MNT --bootloader-id=Lumen --recheck"
   # a copy at the fallback path too, for firmware that forgets boot entries (not on a shared ESP)
   [ "$MODE" = erase ] && inchroot "grub-install --target=x86_64-efi --efi-directory=$ESP_MNT --removable --recheck"
+  # make sure the firmware's boot menu has a "Lumen" entry: some firmware (Lenovo, among others) doesn't keep the
+  # one grub-install writes, and then only lists the fallback copy as "UEFI Hard Drive"
+  if ((DRY)); then echo "+ efibootmgr --create --label Lumen --loader '\\EFI\\Lumen\\grubx64.efi' (if missing)"
+  elif ! efibootmgr 2>/dev/null | grep -qE '^Boot[0-9A-Fa-f]{4}\*? +Lumen\b'; then
+    ESP_NAME="$(basename "$(readlink -f "$EFI_DEV")")"
+    ESP_DISK="/dev/$(lsblk -no PKNAME "$EFI_DEV" 2>/dev/null | head -1 || true)"
+    ESP_PART="$(cat "/sys/class/block/$ESP_NAME/partition" 2>/dev/null || echo 1)"
+    log "No “Lumen” boot entry after grub-install — adding it ($ESP_DISK, partition $ESP_PART)."
+    efibootmgr --create --disk "$ESP_DISK" --part "$ESP_PART" --label Lumen --loader '\EFI\Lumen\grubx64.efi' >/dev/null \
+      || log "Couldn't add the boot entry; the computer starts Lumen from the fallback entry (“UEFI Hard Drive”)."
+  fi
+  ((DRY)) || efibootmgr 2>/dev/null | sed 's/^/firmware: /' || true
 else
   inchroot "grub-install --target=i386-pc --recheck $BOOT_DISK"
 fi

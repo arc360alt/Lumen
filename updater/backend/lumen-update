@@ -1,0 +1,325 @@
+#!/usr/bin/env bash
+# lumen-update — keeps a Lumen computer in step with the Lumen git repository (the engine behind Software Update).
+#
+#   lumen-update check                 what an update would change (JSON; no root needed)
+#   sudo lumen-update apply            update: system files, new packages, one-time steps
+#        --upgrade                     also update every package (pacman -Syu)
+#        --flatpak                     also update Flatpak apps
+#        --commit <hash>               update to exactly this commit (what "check" showed)
+#   lumen-update status | history
+#   lumen-update manifest <dir>        (used by build.sh) the hashes of a staged root
+#
+# How it decides, per file (three-way, like pacman's .pacnew):
+#   base = what the ISO / the last update installed (manifest), system = the file now, new = the repository now
+#   system == new  → nothing           system == base → replaced with new
+#   base == new    → kept (you changed it, the update didn't)
+#   otherwise      → yours is kept; the new version is saved next to it as <file>.lumennew
+# Files in update/exclude.list and everything in /home are never touched. Replaced files are backed up first
+# (/var/lib/lumen-update/backups). Output for the app: log lines plus @@PROGRESS <pct> <text>, @@ERROR, @@DONE.
+#
+# Testing: --dry-run (print, change nothing; no root), --root <dir> (a system in a folder), --repo <url or path>.
+set -Eeuo pipefail
+export LC_ALL=C.UTF-8
+
+CMD="" ROOT=/ DRY=0 REPO="" BRANCH="" COMMIT="" UPGRADE=0 FLATPAK=0 ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    check|apply|status|history) CMD=$1 ;;
+    manifest) CMD=manifest; ARG="${2:?manifest needs a folder}"; shift ;;
+    --root) ROOT="${2:?}"; shift ;;
+    --repo) REPO="${2:?}"; shift ;;
+    --branch) BRANCH="${2:?}"; shift ;;
+    --commit) COMMIT="${2:?}"; shift ;;
+    --repo-dir) REPO_DIR_ARG="${2:?}"; shift ;;
+    --upgrade) UPGRADE=1 ;;
+    --flatpak) FLATPAK=1 ;;
+    --dry-run) DRY=1 ;;
+    -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "lumen-update: unknown option $1 (see --help)" >&2; exit 2 ;;
+  esac
+  shift
+done
+[ -n "$CMD" ] || CMD=status
+
+R="${ROOT%/}"                       # "" for the real system
+STATE="$R/var/lib/lumen-update"
+progress() { echo "@@PROGRESS $1 $2"; }
+log() { echo "$*"; }
+die() { echo "@@ERROR $*"; exit 1; }
+trap 'echo "@@ERROR “$BASH_COMMAND” failed (line $LINENO)."' ERR
+run() { echo "+ $*"; ((DRY)) || "$@"; }
+
+# where updates come from: /etc/lumen/update.conf (REPO=, BRANCH=), unless given
+if [ -f "$R/etc/lumen/update.conf" ]; then
+  CONF_REPO="$(sed -n 's/^REPO=//p' "$R/etc/lumen/update.conf" | tail -1)"
+  CONF_BRANCH="$(sed -n 's/^BRANCH=//p' "$R/etc/lumen/update.conf" | tail -1)"
+fi
+REPO="${REPO:-${CONF_REPO:-https://github.com/arc360alt/Lumen}}"
+BRANCH="${BRANCH:-${CONF_BRANCH:-main}}"
+if [ "$(id -u)" = 0 ] && ! ((DRY)); then CACHE=/var/cache/lumen-update; else CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/lumen-update"; fi
+
+# ------------------------------------------------------------------ hashes
+# "F<mode>:<sha256>" for a file, "L:<target>" for a link, "-" when missing
+fhash() {
+  if [ -L "$1" ]; then printf 'L:%s\n' "$(readlink "$1")"
+  elif [ -f "$1" ]; then printf 'F%s:%s\n' "$(stat -c %a "$1")" "$(sha256sum <"$1" | cut -c1-64)"
+  else echo -; fi
+}
+EXCLUDES=()
+load_excludes() {   # <repo dir>
+  EXCLUDES=()
+  local l
+  [ -f "$1/update/exclude.list" ] || return 0
+  while IFS= read -r l; do
+    l="${l%%#*}"; l="${l%"${l##*[![:space:]]}"}"
+    [ -n "$l" ] && EXCLUDES+=("$l")
+  done <"$1/update/exclude.list"
+}
+excluded() { local p; for p in "${EXCLUDES[@]}"; do [[ "$1" == $p ]] && return 0; done; return 1; }
+manifest_of() {     # <staged dir> → "hash<TAB>path" lines
+  local f
+  while IFS= read -r f; do
+    excluded "$f" && continue
+    printf '%s\t%s\n' "$(fhash "$1/$f")" "$f"
+  done < <(cd "$1" && find . \( -type f -o -type l \) -printf '%P\n' | sort)
+}
+
+if [ "$CMD" = manifest ]; then
+  load_excludes "${REPO_DIR_ARG:-$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)}"
+  manifest_of "$ARG"
+  exit 0
+fi
+
+# ------------------------------------------------------------------ what this computer has now
+base_file() {   # state file, or what the ISO came with
+  if [ -f "$STATE/$1" ]; then echo "$STATE/$1"; elif [ -f "$R/usr/share/lumen/$2" ]; then echo "$R/usr/share/lumen/$2"; else echo /dev/null; fi
+}
+BASE_COMMIT="$(cat "$STATE/commit" 2>/dev/null || sed -n 's/^LUMEN_COMMIT=//p' "$R/usr/share/lumen/build-info" 2>/dev/null || true)"
+
+if [ "$CMD" = status ]; then
+  echo "Lumen ${BASE_COMMIT:0:7} — updates from $REPO ($BRANCH)"
+  [ -f "$STATE/updated" ] && echo "Last updated: $(cat "$STATE/updated")"
+  exit 0
+fi
+if [ "$CMD" = history ]; then
+  cat "$STATE/history" 2>/dev/null || true
+  exit 0
+fi
+
+command -v git >/dev/null || die "git isn't installed (sudo pacman -S git)."
+command -v jq >/dev/null || die "jq isn't installed (sudo pacman -S jq)."
+
+# ------------------------------------------------------------------ the repository
+fetch() {
+  mkdir -p "$CACHE"
+  local G="$CACHE/repo"
+  if [ -d "$G/.git" ] && [ "$(git -C "$G" remote get-url origin 2>/dev/null)" = "$REPO" ]; then
+    git -C "$G" fetch -q --prune origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" || die "Couldn't reach $REPO. Check the internet connection."
+  else
+    rm -rf "$G"
+    git clone -q --no-checkout --branch "$BRANCH" "$REPO" "$G" || die "Couldn't download $REPO. Check the internet connection."
+  fi
+  LATEST="$(git -C "$G" rev-parse "refs/remotes/origin/$BRANCH")"
+  TARGET="${COMMIT:-$LATEST}"
+  git -C "$G" cat-file -e "$TARGET^{commit}" 2>/dev/null || die "The update ($TARGET) isn't in the repository any more. Check again."
+  git -C "$G" -c advice.detachedHead=false checkout -q --force "$TARGET"
+  git -C "$G" clean -q -ffdx
+  REPO_DIR="$G"
+  [ -f "$G/update/stage-root.sh" ] || die "The Lumen repository ($REPO, ${TARGET:0:7}) doesn't have Software Update's files yet (update/stage-root.sh). Push the commit that adds them."
+}
+
+# everything an update would do → $PLAN/{added,updated,conflicts,removed,kept,packages,migrations,commits,manifest}
+plan() {
+  PLAN="$(mktemp -d "$CACHE/plan.XXXXXX")"
+  STAGE="$PLAN/root"
+  bash "$REPO_DIR/update/stage-root.sh" "$REPO_DIR" "$STAGE" >/dev/null
+  load_excludes "$REPO_DIR"
+  local f new sys base
+  declare -gA BASE=()
+  while IFS=$'\t' read -r h f; do [ -n "$f" ] && BASE["$f"]="$h"; done <"$(base_file manifest manifest)"
+  : >"$PLAN/added"; : >"$PLAN/updated"; : >"$PLAN/conflicts"; : >"$PLAN/removed"; : >"$PLAN/kept"
+  manifest_of "$STAGE" >"$PLAN/manifest"
+  declare -A INNEW=()
+  while IFS=$'\t' read -r new f; do
+    INNEW["$f"]=1
+    sys="$(fhash "$R/$f")"
+    [ "$sys" = "$new" ] && continue
+    base="${BASE[$f]:-}"
+    if [ -d "$R/$f" ] && [ ! -L "$R/$f" ]; then
+      echo "$f" >>"$PLAN/conflicts"                                   # a folder is in the way: never replaced
+    elif [ "$sys" = - ]; then
+      [ -n "$base" ] && [ "$base" = "$new" ] && { echo "$f" >>"$PLAN/kept"; continue; }   # you deleted it; unchanged since
+      echo "$f" >>"$PLAN/added"
+    elif [ -n "$base" ] && [ "$sys" = "$base" ]; then
+      echo "$f" >>"$PLAN/updated"
+    elif [ -n "$base" ] && [ "$base" = "$new" ]; then
+      echo "$f" >>"$PLAN/kept"                                         # your change; the update didn't touch it
+    elif [ -z "$base" ] && command -v pacman >/dev/null && [ -z "$R" ] && pacman -Qoq "/$f" >/dev/null 2>&1; then
+      echo "$f" >>"$PLAN/updated"                                      # newly managed, a package's default until now
+    else
+      echo "$f" >>"$PLAN/conflicts"
+    fi
+  done <"$PLAN/manifest"
+  for f in "${!BASE[@]}"; do
+    [ -n "${INNEW[$f]:-}" ] && continue
+    excluded "$f" && continue
+    sys="$(fhash "$R/$f")"
+    if [ "$sys" = "${BASE[$f]}" ]; then echo "$f" >>"$PLAN/removed"; elif [ "$sys" != - ]; then echo "$f" >>"$PLAN/kept"; fi
+  done
+  sort -o "$PLAN/removed" "$PLAN/removed"
+
+  # packages added to the ISO's list since this computer was installed / last updated (the ones not installed yet)
+  local local_pkgs="liquid-desktop-git lumen-installer"
+  grep -Ev '^[[:space:]]*(#|$)' "$REPO_DIR/iso/packages.x86_64" | awk '{print $1}' | sort -u >"$PLAN/pk.new"
+  grep -Ev '^[[:space:]]*(#|$)' "$(base_file packages packages.base)" | awk '{print $1}' | sort -u >"$PLAN/pk.base"
+  : >"$PLAN/packages"
+  while read -r p; do
+    [[ " $local_pkgs " == *" $p "* ]] && continue
+    if [ -z "$R" ] && command -v pacman >/dev/null && pacman -Qq "$p" >/dev/null 2>&1; then continue; fi
+    echo "$p" >>"$PLAN/packages"
+  done < <(comm -13 "$PLAN/pk.base" "$PLAN/pk.new")
+  comm -23 "$PLAN/pk.base" "$PLAN/pk.new" >"$PLAN/packages-dropped"
+
+  # one-time steps not run yet
+  cat "$STATE/migrations.done" "$R/usr/share/lumen/migrations.done" 2>/dev/null | sort -u >"$PLAN/mig.done" || true
+  : >"$PLAN/migrations"
+  for m in "$REPO_DIR"/update/migrations/*.sh; do
+    [ -f "$m" ] || continue
+    grep -qxF "$(basename "$m")" "$PLAN/mig.done" || basename "$m" >>"$PLAN/migrations"
+  done
+
+  # what changed in the repository
+  local range=() known=false
+  if [ -n "$BASE_COMMIT" ] && git -C "$REPO_DIR" merge-base --is-ancestor "$BASE_COMMIT" "$TARGET" 2>/dev/null; then
+    range=("$BASE_COMMIT..$TARGET"); known=true
+  else
+    range=(-n 20 "$TARGET")
+  fi
+  git -C "$REPO_DIR" log --format='%H%x1f%h%x1f%an%x1f%at%x1f%s' "${range[@]}" >"$PLAN/commits"
+  BASE_KNOWN=$known
+}
+
+# changes that need more than copying a file
+needs() {   # <regex> → true if any added/updated/removed path matches
+  cat "$PLAN/added" "$PLAN/updated" "$PLAN/removed" | grep -qE "$1"
+}
+
+# ------------------------------------------------------------------ check
+if [ "$CMD" = check ]; then
+  fetch
+  plan
+  arr() { jq -R . "$1" | jq -s .; }
+  REBOOT=false
+  needs '^(etc/mkinitcpio|etc/plymouth/|usr/share/plymouth/|etc/modprobe\.d/|usr/lib/modprobe\.d/|etc/default/grub)' && REBOOT=true
+  jq -n \
+    --arg repo "$REPO" --arg branch "$BRANCH" --arg current "$BASE_COMMIT" --arg latest "$TARGET" --argjson baseKnown "$BASE_KNOWN" \
+    --argjson commits "$(jq -R 'split("\u001f") | {hash: .[0], short: .[1], author: .[2], time: (.[3] | tonumber), subject: .[4]}' "$PLAN/commits" | jq -s .)" \
+    --argjson added "$(arr "$PLAN/added")" --argjson updated "$(arr "$PLAN/updated")" --argjson conflicts "$(arr "$PLAN/conflicts")" \
+    --argjson removed "$(arr "$PLAN/removed")" --argjson packages "$(arr "$PLAN/packages")" --argjson dropped "$(arr "$PLAN/packages-dropped")" \
+    --argjson migrations "$(arr "$PLAN/migrations")" --argjson restart "$REBOOT" \
+    '{repo: $repo, branch: $branch, current: $current, latest: $latest, baseKnown: $baseKnown, commits: $commits,
+      files: {added: $added, updated: $updated, conflicts: $conflicts, removed: $removed},
+      packages: {add: $packages, droppedFromList: $dropped}, migrations: $migrations, restart: $restart,
+      systemChanges: (($added + $updated + $conflicts + $removed + $packages + $migrations) | length),
+      upToDate: ($current == $latest)}'
+  rm -rf "$PLAN"
+  exit 0
+fi
+
+# ------------------------------------------------------------------ apply
+[ "$CMD" = apply ] || exit 0
+((DRY)) || [ -n "$R" ] || [ "$(id -u)" = 0 ] || die "Updating needs root: sudo lumen-update apply"
+if ! ((DRY)); then
+  mkdir -p "$STATE"
+  exec 9>"$STATE/lock"
+  flock -n 9 || die "Another update is running."
+fi
+log "Lumen update — $(date)   repository: $REPO ($BRANCH)   dry run: $DRY"
+progress 3 "Downloading the update…"
+fetch
+log "From ${BASE_COMMIT:0:7} to ${TARGET:0:7}"
+
+if [ -z "$R" ] && ((UPGRADE)); then
+  progress 8 "Updating all system packages…"
+  run pacman -Syu --noconfirm
+fi
+progress 30 "Looking at what changed…"
+plan
+
+# new packages first, so the files below (which may be their settings) go on top of them
+if [ -s "$PLAN/packages" ]; then
+  if [ -n "$R" ]; then log "Skipping packages for a system in a folder: $(tr '\n' ' ' <"$PLAN/packages")"
+  else
+    progress 35 "Installing new packages…"
+    mapfile -t NEWPKGS <"$PLAN/packages"
+    ((UPGRADE)) || run pacman -Sy --noconfirm
+    run pacman -S --needed --noconfirm "${NEWPKGS[@]}" || die "Couldn't install: ${NEWPKGS[*]}"
+    plan   # package defaults are on disk now: look again
+  fi
+fi
+
+progress 50 "Updating system files…"
+BACKUP="$STATE/backups/$(date +%Y-%m-%d_%H%M%S)"
+backup() { ((DRY)) && return 0; [ -e "$R/$1" ] || [ -L "$R/$1" ] || return 0; mkdir -p "$BACKUP/$(dirname "$1")"; cp -a "$R/$1" "$BACKUP/$1"; }
+# atomic: write next to it, then rename (a running program — even this script — keeps the old copy)
+put() {   # <staged path> <destination>
+  ((DRY)) && { echo "+ install $2"; return 0; }
+  mkdir -p "$(dirname "$2")"
+  local tmp; tmp="$(dirname "$2")/.lumen-update.$$.$(basename "$2")"
+  rm -rf "$tmp"; cp -a "$1" "$tmp"; chown -h 0:0 "$tmp" 2>/dev/null || true
+  mv -fT "$tmp" "$2"
+}
+n=0
+while read -r f; do [ -n "$f" ] || continue; backup "$f"; put "$STAGE/$f" "$R/$f"; log "updated   /$f"; n=$((n + 1)); done <"$PLAN/updated"
+while read -r f; do [ -n "$f" ] || continue; put "$STAGE/$f" "$R/$f"; log "added     /$f"; n=$((n + 1)); done <"$PLAN/added"
+while read -r f; do [ -n "$f" ] || continue
+  if [ -d "$R/$f" ] && [ ! -L "$R/$f" ]; then log "skipped   /$f (a folder is in the way)"; continue; fi
+  put "$STAGE/$f" "$R/$f.lumennew"; log "kept yours /$f — the new version is /$f.lumennew"; done <"$PLAN/conflicts"
+while read -r f; do [ -n "$f" ] || continue; backup "$f"; ((DRY)) || rm -f "$R/$f"; log "removed   /$f"; n=$((n + 1)); done <"$PLAN/removed"
+log "$n system files changed."
+
+if [ -z "$R" ] && ((FLATPAK)) && command -v flatpak >/dev/null; then
+  progress 65 "Updating Flatpak apps…"
+  run flatpak update -y --noninteractive || log "Flatpak update failed (continuing)."
+fi
+
+if [ -s "$PLAN/migrations" ]; then
+  progress 75 "Running one-time update steps…"
+  while read -r m; do
+    [ -n "$m" ] || continue
+    log "step      $m"
+    if ((DRY)); then echo "+ bash update/migrations/$m"; continue; fi
+    if [ -z "$R" ]; then
+      LUMEN_REPO_DIR="$REPO_DIR" bash "$REPO_DIR/update/migrations/$m" || die "The update step $m failed. Nothing else was changed; try again later."
+    else log "(not run for a system in a folder)"; fi
+    echo "$m" >>"$STATE/migrations.done"
+  done <"$PLAN/migrations"
+fi
+
+progress 88 "Finishing…"
+if [ -z "$R" ]; then
+  needs '^etc/systemd/|^usr/lib/systemd/' && run systemctl daemon-reload
+  if needs '^(etc/mkinitcpio|etc/plymouth/|usr/share/plymouth/|etc/modprobe\.d/)'; then
+    progress 90 "Rebuilding the start-up image…"
+    run mkinitcpio -P
+    echo "@@RESTART"
+  fi
+  needs '^etc/default/grub' && run grub-mkconfig -o /boot/grub/grub.cfg
+fi
+
+# remember what this computer has now
+if ! ((DRY)); then
+  # Software Update's own scripts must stay executable (ISOs from 2026-11-14 shipped them as 644)
+  chmod 755 "$R/usr/lib/lumen-update/backend/lumen-update" "$R/usr/lib/lumen-update/session/lumen-updater" 2>/dev/null || true
+  cp "$PLAN/manifest" "$STATE/manifest"
+  cp "$REPO_DIR/iso/packages.x86_64" "$STATE/packages"
+  echo "$TARGET" >"$STATE/commit"
+  date '+%Y-%m-%d %H:%M' >"$STATE/updated"
+  printf '%s\t%s\t%s\t%s\n' "$(date '+%Y-%m-%d %H:%M')" "${BASE_COMMIT:0:7}" "${TARGET:0:7}" \
+    "$(git -C "$REPO_DIR" log -1 --format=%s "$TARGET")" >>"$STATE/history"
+  # keep the five newest backups
+  ls -1d "$STATE"/backups/*/ 2>/dev/null | sort | head -n -5 | xargs -r rm -rf
+fi
+rm -rf "$PLAN"
+progress 100 "Lumen is up to date."
+echo "@@DONE"
